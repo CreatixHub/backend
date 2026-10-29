@@ -1,0 +1,122 @@
+name: Deploy backend
+
+# On every push to main: type-check + build, upload the build to the droplet over SSH, install production
+# dependencies, restart the service, wait for /api/health, and roll back to the previous release if it never
+# becomes healthy. Database migrations and the permission seed run inside the service start (systemd ExecStartPre),
+# so a failed migration also fails the health check and triggers the rollback.
+#
+# One-time setup (already done for this repo): the droplet has the `karkaii` user, /etc/karkaii/api.env,
+# the karkaii-api systemd unit and the nginx /api/ route; the secrets DO_HOST / DO_USER / DO_SSH_KEY /
+# DO_KNOWN_HOSTS were created with deploy/scripts/setup-ci-deploy.sh.
+# Secrets and the database URL live in /etc/karkaii/api.env on the droplet and are never touched by this workflow.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  APP_DIR: /opt/karkaii/api
+  STAGE_DIR: /opt/karkaii/api.deploy
+  SERVICE: karkaii-api
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate the Prisma client
+        run: npx prisma generate
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Check the build is complete
+        run: |
+          test -f dist/server.js
+          test -f dist/seed.js
+          test -f prisma/schema.prisma
+          test -d prisma/migrations
+
+      - name: Assemble the release folder
+        run: |
+          mkdir release
+          cp -r dist prisma package.json package-lock.json release/
+
+      - name: Set up SSH
+        env:
+          DO_SSH_KEY: ${{ secrets.DO_SSH_KEY }}
+          DO_KNOWN_HOSTS: ${{ secrets.DO_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DO_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$DO_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Upload the release
+        env:
+          REMOTE: ${{ secrets.DO_USER }}@${{ secrets.DO_HOST }}
+        run: |
+          SSH="ssh -i $HOME/.ssh/deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes"
+          # keep the previous release for rollback (hard links: instant, no extra disk)
+          $SSH "$REMOTE" "rm -rf '$STAGE_DIR/prev' && mkdir -p '$STAGE_DIR' && cp -al '$APP_DIR' '$STAGE_DIR/prev'"
+          # node_modules is excluded, so --delete never removes it
+          rsync -az --delete --exclude node_modules -e "$SSH" release/ "$REMOTE:$APP_DIR/"
+
+      - name: Install, restart and health check (rolls back on failure)
+        env:
+          REMOTE: ${{ secrets.DO_USER }}@${{ secrets.DO_HOST }}
+        run: |
+          ssh -i "$HOME/.ssh/deploy_key" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$REMOTE" bash -s -- "$APP_DIR" "$STAGE_DIR" "$SERVICE" <<'REMOTE_SCRIPT'
+          set -euo pipefail
+          APP="$1"; STAGE="$2"; SERVICE="$3"
+
+          healthy() {
+            for i in $(seq 1 60); do
+              if curl -fsS http://127.0.0.1:5000/api/health >/dev/null 2>&1; then echo "API healthy after ${i}s"; return 0; fi
+              sleep 1
+            done
+            return 1
+          }
+
+          cd "$APP"
+          npm ci --omit=dev --no-audit --no-fund --silent
+          node node_modules/prisma/build/index.js generate >/dev/null
+          sudo systemctl restart "$SERVICE"
+
+          if healthy; then
+            echo "Released."
+          else
+            echo "API did not become healthy - rolling back to the previous release." >&2
+            journalctl -u "$SERVICE" -n 60 --no-pager >&2 || true
+            rsync -a --delete "$STAGE/prev/" "$APP/"
+            sudo systemctl restart "$SERVICE"
+            healthy || echo "The previous release is not healthy either - check: journalctl -u $SERVICE" >&2
+            exit 1
+          fi
+          REMOTE_SCRIPT
+
+      - name: Clean up the key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

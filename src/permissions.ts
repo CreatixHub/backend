@@ -16,10 +16,15 @@ export interface PermissionDef {
   description: string;
 }
 
-// TODO: generate all 110 with a loop - do NOT type them by hand:
-//   MODULES.flatMap((module) => ACTIONS.map((action) => ({ code: module + '.' + action, module, action,
-//     description: 'Can ' + action + ' ' + module })))
-export const PERMISSIONS: PermissionDef[] = [];
+// Generated, never typed by hand: every module x every action.
+export const PERMISSIONS: PermissionDef[] = MODULES.flatMap((module) =>
+  ACTIONS.map((action) => ({
+    code: module + '.' + action,
+    module,
+    action,
+    description: 'Can ' + action + ' ' + module,
+  })),
+);
 
 export interface RoleDef {
   code: string;
@@ -31,18 +36,46 @@ export interface RoleDef {
 // Helper: every permission of one module, e.g. all('finance') -> ['finance.view', ..., 'finance.manage']
 export const all = (module: string): string[] => ACTIONS.map((a) => module + '.' + a);
 
-// TODO: the 12 roles. Table (from guide section B4):
-//   owner         : NOTHING listed - it is a wildcard in code (already done below)
-//   admin         : every permission code EXCEPT 'organization.manage'   (PERMISSIONS.map(p => p.code).filter(...))
-//   teacher       : dashboard.view; students.view; attendance.view/create/edit; academics.view; examinations.view/create/edit
-//   accountant    : dashboard.view; students.view; all('finance')
-//   receptionist  : dashboard.view; students.view; admissions.view/create/edit
-//   student, parent, librarian, warden, transport_manager, nurse, security : dashboard.view only
+// Everybody in a school may open the dashboard and see basic details of their own school.
+const dashboardOnly = ['dashboard.view', 'organization.view'];
+
 export const DEFAULT_ROLES: RoleDef[] = [
+  // owner has NO rows: it is a wildcard in code (see lib/tenant.ts), so new permissions apply automatically.
   { code: 'owner', name: 'Owner', description: 'Full control. The person who created the school.', permissions: [] },
-  // TODO admin
-  // TODO teacher
-  // TODO accountant
-  // TODO receptionist
-  // TODO student, parent, librarian, warden, transport_manager, nurse, security
+  {
+    code: 'admin',
+    name: 'Administrator',
+    description: 'Runs the school day to day.',
+    permissions: PERMISSIONS.map((p) => p.code).filter((c) => c !== 'organization.manage'),
+  },
+  {
+    code: 'teacher',
+    name: 'Teacher',
+    description: 'Teaches classes, takes attendance and enters exam marks.',
+    permissions: [
+      ...dashboardOnly, 'students.view',
+      'attendance.view', 'attendance.create', 'attendance.edit',
+      'academics.view',
+      'examinations.view', 'examinations.create', 'examinations.edit',
+    ],
+  },
+  {
+    code: 'accountant',
+    name: 'Accountant',
+    description: 'Manages fees and finance.',
+    permissions: [...dashboardOnly, 'students.view', ...all('finance')],
+  },
+  {
+    code: 'receptionist',
+    name: 'Receptionist',
+    description: 'Handles enquiries and admissions.',
+    permissions: [...dashboardOnly, 'students.view', 'admissions.view', 'admissions.create', 'admissions.edit'],
+  },
+  { code: 'student', name: 'Student', description: 'A student of the school.', permissions: dashboardOnly },
+  { code: 'parent', name: 'Parent', description: 'A parent or guardian.', permissions: dashboardOnly },
+  { code: 'librarian', name: 'Librarian', description: 'Runs the library.', permissions: dashboardOnly },
+  { code: 'warden', name: 'Warden', description: 'Runs the hostel.', permissions: dashboardOnly },
+  { code: 'transport_manager', name: 'Transport manager', description: 'Runs school transport.', permissions: dashboardOnly },
+  { code: 'nurse', name: 'Nurse', description: 'School health room.', permissions: dashboardOnly },
+  { code: 'security', name: 'Security', description: 'Gate and campus security.', permissions: dashboardOnly },
 ];

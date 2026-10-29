@@ -1,15 +1,23 @@
 import { z } from 'zod';
 
-// SHOULD-level (role editing). Skip these three until the MUST parts work.
+const permissionCodes = z.array(z.string().trim().min(1).max(80)).max(200);
 
-// TODO: code         string matching /^[a-z][a-z0-9_]{2,40}$/ and not 'owner'
-//       name         string, trim, 2-120
-//       description  OPTIONAL string, max 300
-//       permissions  array of strings (permission codes), max 200
-export const createRoleSchema = z.object({}).strict();
+export const createRoleSchema = z
+  .object({
+    code: z.string().regex(/^[a-z][a-z0-9_]{2,40}$/, 'code must be 3-41 characters: lowercase letters, digits and underscores').refine((c) => c !== 'owner', 'this code is reserved'),
+    name: z.string().trim().min(2).max(120),
+    description: z.string().trim().max(300).optional(),
+    permissions: permissionCodes,
+  })
+  .strict();
 
-// TODO: name OPTIONAL, description OPTIONAL, permissions OPTIONAL (same rules as above)
-export const updateRoleSchema = z.object({}).strict();
+export const updateRoleSchema = z
+  .object({
+    name: z.string().trim().min(2).max(120).optional(),
+    description: z.string().trim().max(300).optional(),
+    permissions: permissionCodes.optional(),
+  })
+  .strict();
 
 export type CreateRoleInput = z.infer<typeof createRoleSchema>;
 export type UpdateRoleInput = z.infer<typeof updateRoleSchema>;

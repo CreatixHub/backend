@@ -1,44 +1,101 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from '../../db';
 import { HttpError } from '../../lib/errors';
 import type { TenantContext } from '../../lib/tenant';
 import type { CreateRoleInput, UpdateRoleInput } from './roles.schemas';
 
-// MUST: listPermissions and listRoles.  SHOULD: createRole, updateRole, deleteRole.
+const ROLE_SELECT = {
+  id: true,
+  code: true,
+  name: true,
+  description: true,
+  isSystem: true,
+  _count: { select: { membershipRoles: true } },
+  rolePermissions: { select: { permission: { select: { code: true } } } },
+} satisfies Prisma.RoleSelect;
 
-// The whole catalogue, flat and sorted: [{ code, module, action }]
+type RoleRow = Prisma.RoleGetPayload<{ select: typeof ROLE_SELECT }>;
+
+const toRole = (r: RoleRow) => ({
+  id: r.id,
+  code: r.code,
+  name: r.name,
+  description: r.description,
+  isSystem: r.isSystem,
+  memberCount: r._count.membershipRoles,
+  permissions: r.code === 'owner' ? ['*'] : r.rolePermissions.map((rp) => rp.permission.code).sort(),
+});
+
+// The whole catalogue, flat and sorted.
 export async function listPermissions(): Promise<unknown> {
-  // TODO: prisma.permission.findMany({ select: { code: true, module: true, action: true }, orderBy: [{ module: 'asc' }, { action: 'asc' }] })
-  void prisma;
-  throw new Error('TODO C11a: listPermissions');
+  return prisma.permission.findMany({
+    select: { code: true, module: true, action: true },
+    orderBy: [{ module: 'asc' }, { action: 'asc' }],
+  });
 }
 
-// This school's roles: [{ id, code, name, description, isSystem, memberCount, permissions: ['students.view', ...] }]
-// The owner role shows permissions ['*'].
+// This school's roles with their permissions and how many people hold each.
 export async function listRoles(tenant: TenantContext): Promise<unknown> {
-  // TODO: prisma.role.findMany({ where: { tenantId: tenant.id }, orderBy: { id: 'asc' },
-  //         select: { id, code, name, description, isSystem, _count: { select: { membershipRoles: true } },
-  //                   rolePermissions: { select: { permission: { select: { code: true } } } } } })
-  // TODO: map: memberCount = _count.membershipRoles; permissions = code === 'owner' ? ['*'] : sorted codes
-  void tenant;
-  throw new Error('TODO C11a: listRoles');
+  const roles = await prisma.role.findMany({ where: { tenantId: tenant.id }, select: ROLE_SELECT, orderBy: { id: 'asc' } });
+  return roles.map(toRole);
+}
+
+async function permissionIds(codes: string[]) {
+  const unique = [...new Set(codes)];
+  const found = await prisma.permission.findMany({ where: { code: { in: unique } }, select: { id: true, code: true } });
+  const missing = unique.filter((c) => !found.some((p) => p.code === c));
+  if (missing.length) throw new HttpError(400, `Unknown permission: ${missing.join(', ')}`);
+  return found;
+}
+
+async function loadRole(tenant: TenantContext, roleId: bigint) {
+  const role = await prisma.role.findFirst({ where: { id: roleId, tenantId: tenant.id }, select: ROLE_SELECT });
+  if (!role) throw new HttpError(404, 'Role not found');
+  return role;
 }
 
 export async function createRole(tenant: TenantContext, input: CreateRoleInput): Promise<unknown> {
-  // TODO: every permission code must exist (else 400 listing the unknown ones); duplicate code in this school -> 409 (P2002);
-  //       create a CUSTOM role (isSystem: false) and its role_permissions in ONE transaction
-  void tenant; void input; void HttpError;
-  throw new Error('TODO C11c: createRole');
+  const perms = await permissionIds(input.permissions);
+  try {
+    const roleId = await prisma.$transaction(async (tx) => {
+      const role = await tx.role.create({
+        data: { tenantId: tenant.id, code: input.code, name: input.name, description: input.description, isSystem: false },
+        select: { id: true },
+      });
+      await tx.rolePermission.createMany({
+        data: perms.map((p) => ({ roleId: role.id, permissionId: p.id, tenantId: tenant.id })),
+      });
+      return role.id;
+    });
+    return toRole(await loadRole(tenant, roleId));
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+      throw new HttpError(409, 'A role with this code already exists');
+    }
+    throw e;
+  }
 }
 
 export async function updateRole(tenant: TenantContext, roleId: bigint, input: UpdateRoleInput): Promise<unknown> {
-  // TODO: find the role with { id: roleId, tenantId: tenant.id } (404); isSystem -> HttpError(403, 'System roles cannot be changed');
-  //       update name/description; if permissions given REPLACE the set (deleteMany + createMany) in ONE transaction
-  void tenant; void roleId; void input;
-  throw new Error('TODO C11c: updateRole');
+  const role = await loadRole(tenant, roleId);
+  if (role.isSystem) throw new HttpError(403, 'System roles cannot be changed');
+  const perms = input.permissions ? await permissionIds(input.permissions) : undefined;
+
+  await prisma.$transaction(async (tx) => {
+    await tx.role.update({ where: { id: roleId }, data: { name: input.name, description: input.description } });
+    if (perms) {
+      await tx.rolePermission.deleteMany({ where: { roleId } });
+      await tx.rolePermission.createMany({
+        data: perms.map((p) => ({ roleId, permissionId: p.id, tenantId: tenant.id })),
+      });
+    }
+  });
+  return toRole(await loadRole(tenant, roleId));
 }
 
 export async function deleteRole(tenant: TenantContext, roleId: bigint): Promise<void> {
-  // TODO: 404 if not in this school; system -> 403; any membership uses it -> HttpError(409, 'Role is in use'); else delete
-  void tenant; void roleId;
-  throw new Error('TODO C11c: deleteRole');
+  const role = await loadRole(tenant, roleId);
+  if (role.isSystem) throw new HttpError(403, 'System roles cannot be deleted');
+  if (role._count.membershipRoles > 0) throw new HttpError(409, 'Role is in use');
+  await prisma.role.delete({ where: { id: roleId } });
 }

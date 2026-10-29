@@ -129,27 +129,60 @@ export async function refresh(
   cookieToken: string | undefined,
   meta: ClientMeta,
 ): Promise<AuthResult> {
-  // TODO 1: no cookie -> throw new HttpError(401, 'Unauthorized')
-  // TODO 2: row = prisma.refreshToken.findUnique({ where: { tokenHash: sha256(cookieToken) } }); none -> 401
-  // TODO 3: if row.revokedAt -> 401
-  // TODO 4: if row.usedAt:
-  //           used within REFRESH_GRACE_SECONDS -> throw new HttpError(409, 'Session refresh in progress')   (revoke NOTHING)
-  //           older -> theft signal: revokeFamily(row.familyId, 'reuse_detected'), then 401
-  // TODO 5: row.expiresAt < now -> 401
-  // TODO 6: claim it atomically:
-  //         const claimed = await prisma.refreshToken.updateMany({ where: { id: row.id, usedAt: null, revokedAt: null }, data: { usedAt: new Date() } })
-  //         if (claimed.count !== 1) throw new HttpError(409, 'Session refresh in progress')
-  // TODO 7: load the user (status 'active', deletedAt null) or 401
-  // TODO 8: keep row.tenantId if loadTenantContext(user.id, row.tenantId) is not null, else pickTenantId(user.id)
-  // TODO 9: createSession({ userId, tenantId, meta, familyId: row.familyId }) and return like login
-  void sha256;
-  void revokeFamily;
-  throw new Error("TODO C9: refresh");
+  if (!cookieToken) throw new HttpError(401, "Unauthorized");
+
+  const row = await prisma.refreshToken.findUnique({
+    where: { tokenHash: sha256(cookieToken) },
+  });
+  if (!row || row.revokedAt) throw new HttpError(401, "Unauthorized");
+
+  if (row.usedAt) {
+    const secondsAgo = (Date.now() - row.usedAt.getTime()) / 1000;
+    if (secondsAgo <= REFRESH_GRACE_SECONDS) {
+      // a second browser tab or a React double-start raced us: harmless, revoke nothing
+      throw new HttpError(409, "Session refresh in progress");
+    }
+    // an OLD token was replayed much later: somebody copied it. Kill the whole login.
+    await revokeFamily(row.familyId, "reuse_detected");
+    throw new HttpError(401, "Unauthorized");
+  }
+  if (row.expiresAt < new Date()) throw new HttpError(401, "Unauthorized");
+
+  // claim it atomically: of two simultaneous requests only ONE can flip usedAt from null
+  const claimed = await prisma.refreshToken.updateMany({
+    where: { id: row.id, usedAt: null, revokedAt: null },
+    data: { usedAt: new Date() },
+  });
+  if (claimed.count !== 1) throw new HttpError(409, "Session refresh in progress");
+
+  const user = await prisma.user.findFirst({
+    where: { id: row.userId, status: "active", deletedAt: null },
+    select: { id: true, email: true, fullName: true, phone: true, avatarUrl: true },
+  });
+  if (!user) throw new HttpError(401, "Unauthorized");
+
+  // keep the school this session was in if the membership is still valid, otherwise fall back
+  let tenant = row.tenantId ? await loadTenantContext(user.id, row.tenantId) : null;
+  if (!tenant) {
+    const fallbackId = await pickTenantId(user.id);
+    tenant = fallbackId ? await loadTenantContext(user.id, fallbackId) : null;
+  }
+
+  const session = await createSession({
+    userId: user.id,
+    tenantId: tenant?.id ?? null,
+    meta,
+    familyId: row.familyId, // same chain, so one logout or one theft signal covers it all
+  });
+  return { session, user, tenant, organizations: await listMyOrganizations(user.id) };
 }
 
 export async function logout(cookieToken: string | undefined): Promise<void> {
-  // TODO: if cookieToken: find its row (by sha256) and revokeFamily(row.familyId, 'logout'). Never throw for a missing/unknown cookie.
-  void cookieToken;
+  if (!cookieToken) return; // nothing to revoke; logging out must never fail
+  const row = await prisma.refreshToken.findUnique({
+    where: { tokenHash: sha256(cookieToken) },
+  });
+  if (row) await revokeFamily(row.familyId, "logout");
 }
 
 // ---------------------------------------------------------------- C10c
@@ -159,19 +192,43 @@ export async function switchOrganization(
   cookieToken: string | undefined,
   meta: ClientMeta,
 ): Promise<AuthResult> {
-  // TODO 1: tenantId = membership of userId in the active school with that slug -> pickTenantId would FALL BACK to another school,
-  //         so query it directly: prisma.membership.findFirst({ where: { userId, status: 'active',
-  //         tenant: { is: { slug: slug.toLowerCase(), status: 'active', deletedAt: null } } }, select: { tenantId: true } })
-  //         none -> throw new HttpError(403, 'You do not have access to this organization')   (same answer if the school does not exist)
-  // TODO 2: tenant = await loadTenantContext(userId, tenantId)
-  // TODO 3: familyId: if cookieToken matches an UNUSED, UNREVOKED row of THIS user, claim it (same updateMany as refresh) and reuse its familyId;
-  //         otherwise leave familyId undefined (new family)
-  // TODO 4: session = createSession({ userId, tenantId, meta, familyId }); load the user; return like login
-  void userId;
-  void slug;
-  void cookieToken;
-  void meta;
-  throw new Error("TODO C10c: switchOrganization");
+  // The person's own active membership in the school with that slug. We query it directly (pickTenantId would
+  // FALL BACK to another school). Same 403 whether the school does not exist or the person is not in it.
+  const noAccess = () => new HttpError(403, "You do not have access to this organization");
+  const membership = await prisma.membership.findFirst({
+    where: {
+      userId,
+      status: "active",
+      tenant: { is: { slug: slug.toLowerCase(), status: "active", deletedAt: null } },
+    },
+    select: { tenantId: true },
+  });
+  if (!membership) throw noAccess();
+
+  const tenant = await loadTenantContext(userId, membership.tenantId);
+  if (!tenant) throw noAccess();
+
+  // Take over the current login chain if the cookie belongs to this person and is still unused.
+  let familyId: string | undefined;
+  if (cookieToken) {
+    const row = await prisma.refreshToken.findUnique({ where: { tokenHash: sha256(cookieToken) } });
+    if (row && row.userId === userId && !row.usedAt && !row.revokedAt && row.expiresAt > new Date()) {
+      const claimed = await prisma.refreshToken.updateMany({
+        where: { id: row.id, usedAt: null, revokedAt: null },
+        data: { usedAt: new Date() },
+      });
+      if (claimed.count === 1) familyId = row.familyId;
+    }
+  }
+
+  const user = await prisma.user.findFirst({
+    where: { id: userId, status: "active", deletedAt: null },
+    select: { id: true, email: true, fullName: true, phone: true, avatarUrl: true },
+  });
+  if (!user) throw new HttpError(401, "Unauthorized");
+
+  const session = await createSession({ userId, tenantId: tenant.id, meta, familyId });
+  return { session, user, tenant, organizations: await listMyOrganizations(userId) };
 }
 
 // Revokes every refresh token of one login chain.

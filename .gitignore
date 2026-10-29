@@ -1,9 +1,20 @@
-
 node_modules/
 dist/
-Karkaii backend guide · 23
+release/
+
+# secrets: never commit these
 .env
 .env.*
+!env.template
+
 .pgdata/
 *.log
 
+# local test helpers that hold passwords, tokens or cookies
+jar.txt
+old-jar.txt
+login.json
+body.json
+bad.json
+bad2.json
+resp.json

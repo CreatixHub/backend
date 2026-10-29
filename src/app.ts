@@ -12,6 +12,9 @@ import { errorHandler } from "./middleware/errorHandler";
 import { publicAuthRouter } from "./modules/auth/auth.routes";
 import { authenticate } from "./middleware/authenticate";
 import { privateAuthRouter } from "./modules/auth/auth.routes";
+import { membersRouter } from "./modules/members/members.routes";
+import { organizationsRouter } from "./modules/organizations/organizations.routes";
+import { permissionsRouter, rolesRouter } from "./modules/roles/roles.routes";
 
 // Building the app in a function (instead of starting the server here) lets tests use it too.
 // The ORDER of the lines below is the security design: Express runs them top to bottom.
@@ -44,10 +47,10 @@ export function createApp() {
 
   app.use("/api", authenticate); // THE DIVIDING LINE: everything below needs a signed-in person
   app.use("/api/auth", privateAuthRouter); // me, switch-organization
-  // C10:         app.use('/api/organizations', organizationsRouter);
-  // C11:         app.use('/api/members', membersRouter);
-  //              app.use('/api/roles', rolesRouter);
-  //              app.use('/api/permissions', permissionsRouter);
+  app.use("/api/organizations", organizationsRouter);
+  app.use("/api/members", membersRouter);
+  app.use("/api/roles", rolesRouter);
+  app.use("/api/permissions", permissionsRouter);
 
   app.use((_req, _res, next) => next(new HttpError(404, "Not found"))); // nothing matched
   app.use(errorHandler); // must be the very last line
