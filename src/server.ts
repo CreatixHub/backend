@@ -1,9 +1,17 @@
-// Placeholder so "npm run dev" works from minute one.
-// Step 9 of the guide replaces this file with the real server.
-import express from 'express';
+import { createApp } from './app';
+import { config } from './config';
+import { prisma } from './db';
 
-const app = express();
-app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok (placeholder - replace in step 9)' });
+const server = createApp().listen(config.PORT, () => {
+  console.log(`API listening on http://localhost:${config.PORT}/api`);
 });
-app.listen(5000, () => console.log('placeholder API on http://localhost:5000/api/health'));
+
+// Close cleanly when the process is asked to stop (Ctrl+C, systemd restart, deploy).
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(signal, () => {
+    server.close(async () => {
+      await prisma.$disconnect();
+      process.exit(0);
+    });
+  });
+}

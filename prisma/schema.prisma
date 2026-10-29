@@ -1,0 +1,177 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// A tenant: one school (or school group). People do NOT belong to an organization directly;
+// they are linked to it through a Membership.
+model Organization {
+  id        BigInt    @id @default(autoincrement())
+  slug      String    @unique
+  name      String
+  timezone  String    @default("UTC")
+  status    String    @default("active") // active | suspended
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  memberships      Membership[]
+  roles            Role[]
+  rolePermissions  RolePermission[]
+  membershipRoles  MembershipRole[]
+  refreshTokens    RefreshToken[]
+  auditLogs        AuditLog[]
+
+  @@map("organizations")
+}
+
+// ONE account per person, shared by every school they belong to: no tenant_id here,
+// and email is unique across the whole system.
+model User {
+  id                BigInt    @id @default(autoincrement())
+  email             String    @unique // stored lower-case
+  fullName          String    @map("full_name")
+  passwordHash      String    @map("password_hash")
+  phone             String?
+  avatarUrl         String?   @map("avatar_url")
+  status            String    @default("active") // active | disabled
+  failedLoginCount  Int       @default(0) @map("failed_login_count")
+  lockedUntil       DateTime? @map("locked_until") @db.Timestamptz(6)
+  lastLoginAt       DateTime? @map("last_login_at") @db.Timestamptz(6)
+  passwordChangedAt DateTime? @map("password_changed_at") @db.Timestamptz(6)
+  emailVerifiedAt   DateTime? @map("email_verified_at") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt         DateTime? @map("deleted_at") @db.Timestamptz(6)
+  version           Int       @default(1)
+
+  memberships   Membership[]
+  refreshTokens RefreshToken[]
+
+  @@map("users")
+}
+
+// "This person belongs to this school." One row per (school, person).
+model Membership {
+  id        BigInt   @id @default(autoincrement())
+  tenantId  BigInt   @map("tenant_id")
+  userId    BigInt   @map("user_id")
+  status    String   @default("active") // active | suspended
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant Organization     @relation(fields: [tenantId], references: [id])
+  user   User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  roles  MembershipRole[]
+
+  @@unique([tenantId, userId])
+  @@index([userId])
+  @@map("memberships")
+}
+
+// Roles belong to ONE school: every school gets its own copies (owner, admin, teacher, ...).
+model Role {
+  id          BigInt   @id @default(autoincrement())
+  tenantId    BigInt   @map("tenant_id")
+  code        String
+  name        String
+  description String?
+  isSystem    Boolean  @default(false) @map("is_system")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant          Organization     @relation(fields: [tenantId], references: [id])
+  rolePermissions RolePermission[]
+  membershipRoles MembershipRole[]
+
+  @@unique([tenantId, code])
+  @@map("roles")
+}
+
+// Global catalogue of permission codes, e.g. "students.create". Not tenant-specific.
+model Permission {
+  id          BigInt   @id @default(autoincrement())
+  code        String   @unique
+  module      String
+  action      String
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  rolePermissions RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       BigInt   @map("role_id")
+  permissionId BigInt   @map("permission_id")
+  tenantId     BigInt   @map("tenant_id")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  role       Role         @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission   @relation(fields: [permissionId], references: [id])
+  tenant     Organization @relation(fields: [tenantId], references: [id])
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+// Which roles a membership has (your ERD calls this table user_roles).
+model MembershipRole {
+  membershipId BigInt   @map("membership_id")
+  roleId       BigInt   @map("role_id")
+  tenantId     BigInt   @map("tenant_id")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  membership Membership   @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+  role       Role         @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  tenant     Organization @relation(fields: [tenantId], references: [id])
+
+  @@id([membershipId, roleId])
+  @@index([tenantId])
+  @@map("membership_roles")
+}
+
+// A login session of a PERSON. tenantId = the school this session is currently acting in (optional).
+model RefreshToken {
+  id            BigInt    @id @default(autoincrement())
+  userId        BigInt    @map("user_id")
+  tenantId      BigInt?   @map("tenant_id")
+  familyId      String    @map("family_id") @db.Uuid
+  tokenHash     String    @unique @map("token_hash")
+  userAgent     String?   @map("user_agent")
+  ip            String?
+  expiresAt     DateTime  @map("expires_at") @db.Timestamptz(6)
+  usedAt        DateTime? @map("used_at") @db.Timestamptz(6)
+  revokedAt     DateTime? @map("revoked_at") @db.Timestamptz(6)
+  revokedReason String?   @map("revoked_reason")
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user   User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenant Organization? @relation(fields: [tenantId], references: [id])
+
+  @@index([familyId])
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+// tenantId is optional: events like "signup" happen before the person belongs to any school.
+model AuditLog {
+  id         BigInt   @id @default(autoincrement())
+  tenantId   BigInt?  @map("tenant_id")
+  actorId    BigInt?  @map("actor_id")
+  action     String
+  entityType String   @map("entity_type")
+  entityId   String?  @map("entity_id")
+  ip         String?
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant Organization? @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, createdAt])
+  @@map("audit_log")
+}
