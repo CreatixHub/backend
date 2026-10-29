@@ -9,8 +9,9 @@ import { prisma } from "./db";
 import { HttpError } from "./lib/errors";
 import { ok } from "./lib/respond";
 import { errorHandler } from "./middleware/errorHandler";
-
 import { publicAuthRouter } from "./modules/auth/auth.routes";
+import { authenticate } from "./middleware/authenticate";
+import { privateAuthRouter } from "./modules/auth/auth.routes";
 
 // Building the app in a function (instead of starting the server here) lets tests use it too.
 // The ORDER of the lines below is the security design: Express runs them top to bottom.
@@ -39,16 +40,14 @@ export function createApp() {
   });
 
   // ---- UNCOMMENT each line when its chapter's code is finished (and add the imports at the top) ----
-  // C6, C7, C9:  app.use('/api/auth', publicAuthRouter);     // signup, login, refresh, logout  (public)
-  //
-  // C8:          app.use('/api', authenticate);              // THE DIVIDING LINE: everything below needs a signed-in person
-  // C8, C10c:    app.use('/api/auth', privateAuthRouter);    // me, switch-organization
+  app.use("/api/auth", publicAuthRouter); // signup, login, refresh, logout  (public)
+
+  app.use("/api", authenticate); // THE DIVIDING LINE: everything below needs a signed-in person
+  app.use("/api/auth", privateAuthRouter); // me, switch-organization
   // C10:         app.use('/api/organizations', organizationsRouter);
   // C11:         app.use('/api/members', membersRouter);
   //              app.use('/api/roles', rolesRouter);
   //              app.use('/api/permissions', permissionsRouter);
-
-  app.use("/api/auth", publicAuthRouter);
 
   app.use((_req, _res, next) => next(new HttpError(404, "Not found"))); // nothing matched
   app.use(errorHandler); // must be the very last line

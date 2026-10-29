@@ -1,5 +1,9 @@
 import type { NextFunction, Request, Response } from 'express';
+import jwt from 'jsonwebtoken';
+import { config } from '../config';
+import { prisma } from '../db';
 import { HttpError } from '../lib/errors';
+import { loadTenantContext } from '../lib/tenant';
 import type { TenantContext } from '../lib/tenant';
 
 // WHO is calling: a person (not a person-in-a-school; req.tenant adds that).
@@ -24,18 +28,37 @@ export function currentTenant(req: Request): TenantContext {
 }
 
 // Turns a Bearer token into req.user (and req.tenant). Everything mounted AFTER it in app.ts needs a signed-in person.
-// UNTIL YOU FINISH IT, it rejects every request (safe default).
 export async function authenticate(req: Request, _res: Response, next: NextFunction): Promise<void> {
-  // TODO 1: header must be "Authorization: Bearer <token>" -> otherwise throw new HttpError(401, 'Unauthorized')
-  //         const [scheme, token] = (req.headers.authorization ?? '').split(' ')
-  // TODO 2: verify the token; ANY failure (bad signature, expired, wrong shape) -> the same generic 401:
-  //         const payload = jwt.verify(token, config.JWT_ACCESS_SECRET, { algorithms: ['HS256'] })
-  //         payload is string | JwtPayload: require an object with a string "sub"; "tid" is optional (string)
-  // TODO 3: load the person EVERY request: prisma.user.findFirst({ where: { id: BigInt(sub), status: 'active', deletedAt: null },
-  //         select: { id, email, fullName, phone, avatarUrl } })   none -> 401
-  // TODO 4: if payload has tid: const tenant = await loadTenantContext(user.id, BigInt(tid))
-  //         tenant === null (membership or school suspended) -> 401  (the frontend then refreshes and falls back)
-  // TODO 5: req.user = user; req.tenant = tenant (when present); next()
-  void req; void next;
-  throw new HttpError(401, 'Unauthorized');
+  // 1. the header must be exactly:  Authorization: Bearer <token>
+  const [scheme, token] = (req.headers.authorization ?? '').split(' ');
+  if (scheme !== 'Bearer' || !token) throw new HttpError(401, 'Unauthorized');
+
+  // 2. verify the token; any problem (bad signature, expired, wrong shape) gives the same generic 401
+  let sub: string;
+  let tid: string | undefined;
+  try {
+    const payload = jwt.verify(token, config.JWT_ACCESS_SECRET, { algorithms: ['HS256'] });
+    if (typeof payload === 'string' || typeof payload.sub !== 'string') throw new Error('bad payload');
+    sub = payload.sub;
+    tid = typeof payload.tid === 'string' ? payload.tid : undefined;
+  } catch {
+    throw new HttpError(401, 'Unauthorized');
+  }
+
+  // 3. load the person on EVERY request, so disabling an account takes effect immediately
+  const user = await prisma.user.findFirst({
+    where: { id: BigInt(sub), status: 'active', deletedAt: null },
+    select: { id: true, email: true, fullName: true, phone: true, avatarUrl: true },
+  });
+  if (!user) throw new HttpError(401, 'Unauthorized');
+
+  // 4. if the token names a school, the membership and the school must still be active
+  if (tid) {
+    const tenant = await loadTenantContext(user.id, BigInt(tid));
+    if (!tenant) throw new HttpError(401, 'Unauthorized');
+    req.tenant = tenant;
+  }
+
+  req.user = user;
+  next();
 }

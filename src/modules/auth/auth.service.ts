@@ -78,22 +78,49 @@ export async function login(
   input: LoginInput,
   meta: ClientMeta,
 ): Promise<AuthResult> {
-  // const invalid = () => new HttpError(401, 'Invalid email or password')   // SAME message for every failure
-  // TODO 1: find the user: prisma.user.findFirst({ where: { email: input.email.toLowerCase(), deletedAt: null } })
-  // TODO 2: password check WITHOUT revealing if the email exists:
-  //         ok = user ? await argon2.verify(user.passwordHash, input.password) : false
-  //         if (!user) await argon2.verify(await dummyHash, input.password)   // burn the same time
-  // TODO 3: if (!user || !ok || user.status !== 'active') throw invalid()
-  // TODO 4: update lastLoginAt = now
-  // TODO 5: const tenantId = await pickTenantId(user.id, input.organization)
-  //         const tenant = tenantId ? await loadTenantContext(user.id, tenantId) : null
-  // TODO 6: const session = await createSession({ userId: user.id, tenantId: tenant?.id ?? null, meta })
-  // TODO 7: return { session, user: {id, fullName, email, phone, avatarUrl}, tenant, organizations: await listMyOrganizations(user.id) }
-  void dummyHash;
-  void pickTenantId;
-  void loadTenantContext;
-  void listMyOrganizations;
-  throw new Error("TODO C7: login");
+  const invalid = () => new HttpError(401, "Invalid email or password");
+
+  // find the person by email
+  const user = await prisma.user.findFirst({
+    where: { email: input.email, deletedAt: null },
+  });
+
+  // check the password without revealing whether the email exists
+  const passwordOk = user
+    ? await argon2.verify(user.passwordHash, input.password)
+    : false;
+
+  if (!user) await argon2.verify(await dummyHash, input.password);
+
+  // one generic failure for: unknow email, wrong password, disabled account
+  //
+  if (!user || !passwordOk || user.status !== "active") throw invalid();
+
+  // record login
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      lastLoginAt: new Date(),
+    },
+  });
+
+  // choose the school to start in (none yet for a new person)
+  const tenantId = await pickTenantId(user.id, input.organization);
+  const tenant = tenantId ? await loadTenantContext(user.id, tenantId) : null;
+
+  // start the session
+  const session = await createSession({
+    userId: user.id,
+    tenantId: tenant?.id ?? null,
+    meta,
+  });
+
+  return {
+    session, 
+    user: {id: user.id, fullName: user.fullName, email: user.email, phone: user.phone, avatarUrl: user.avatarUrl},
+    tenant, 
+    organizations: await listMyOrganizations(user.id),
+  };
 }
 
 // ---------------------------------------------------------------- C9

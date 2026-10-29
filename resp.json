@@ -1,0 +1,1 @@
+{"success":true,"data":{"accessToken":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiaWF0IjoxNzkzMjczOTgzLCJleHAiOjE3OTMyNzQ4ODN9.lVakHOjML7m4RVq6XxvrG88mlRNoN0A8Kllr9PpM_gA","expiresIn":900,"user":{"id":"1","name":"As Kumar","email":"asha@example.com","role":null,"permissions":[],"avatar":null,"phone":null,"organization":null},"organizations":[]}}
