@@ -29,7 +29,15 @@ export function createApp() {
     ok(res, { status: 'ok' });
   });
 
-  // (C6+ add: app.use('/api/auth', publicAuthRouter) here, then authenticate, then the protected routers)
+  // ---- UNCOMMENT each line when its chapter's code is finished (and add the imports at the top) ----
+  // C6, C7, C9:  app.use('/api/auth', publicAuthRouter);     // signup, login, refresh, logout  (public)
+  //
+  // C8:          app.use('/api', authenticate);              // THE DIVIDING LINE: everything below needs a signed-in person
+  // C8, C10c:    app.use('/api/auth', privateAuthRouter);    // me, switch-organization
+  // C10:         app.use('/api/organizations', organizationsRouter);
+  // C11:         app.use('/api/members', membersRouter);
+  //              app.use('/api/roles', rolesRouter);
+  //              app.use('/api/permissions', permissionsRouter);
 
   app.use((_req, _res, next) => next(new HttpError(404, 'Not found'))); // nothing matched
   app.use(errorHandler); // must be the very last line
