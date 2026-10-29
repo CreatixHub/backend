@@ -1,43 +1,83 @@
-import { Prisma } from '@prisma/client';
-import * as argon2 from 'argon2';
-import { prisma } from '../../db';
-import { HttpError } from '../../lib/errors';
-import { sha256 } from '../../lib/hash';
-import { listMyOrganizations, loadTenantContext, pickTenantId } from '../../lib/tenant';
-import type { TenantContext } from '../../lib/tenant';
-import type { LoginInput, SignupInput } from './auth.schemas';
-import { createSession } from './session';
-import type { ClientMeta } from './session';
+import { Prisma } from "@prisma/client";
+import * as argon2 from "argon2";
+import { prisma } from "../../db";
+import { HttpError } from "../../lib/errors";
+import { sha256 } from "../../lib/hash";
+import {
+  listMyOrganizations,
+  loadTenantContext,
+  pickTenantId,
+} from "../../lib/tenant";
+import type { TenantContext } from "../../lib/tenant";
+import type { LoginInput, SignupInput } from "./auth.schemas";
+import { createSession } from "./session";
+import type { ClientMeta } from "./session";
 
 // What every auth function returns; auth.routes.ts hands it to sendSession().
 export interface AuthResult {
   session: { accessToken: string; refreshToken: string };
-  user: { id: bigint; fullName: string; email: string; phone: string | null; avatarUrl: string | null };
+  user: {
+    id: bigint;
+    fullName: string;
+    email: string;
+    phone: string | null;
+    avatarUrl: string | null;
+  };
   tenant: TenantContext | null;
   organizations: unknown[];
 }
 
 // Verified against when the email is unknown, so "unknown email" and "wrong password" take the same time.
-const dummyHash = argon2.hash('not-a-real-password');
+const dummyHash = argon2.hash("not-a-real-password");
 
 // A refresh token used within this many seconds is a harmless race (second tab, React double-start): 409, no revoke.
 const REFRESH_GRACE_SECONDS = 10;
 
 // ---------------------------------------------------------------- C6
-export async function signup(input: SignupInput, meta: ClientMeta): Promise<AuthResult> {
-  // TODO 1: const passwordHash = await argon2.hash(input.password)
-  // TODO 2: try { prisma.user.create({ data: { email: input.email.toLowerCase(), fullName, passwordHash,
-  //                passwordChangedAt: new Date() }, select: { id, email, fullName, phone, avatarUrl } }) }
-  //         catch: Prisma.PrismaClientKnownRequestError with code 'P2002' -> throw new HttpError(409, 'An account with this email already exists')
-  //                anything else -> rethrow
-  // TODO 3: const session = await createSession({ userId: user.id, tenantId: null, meta })
-  // TODO 4: return { session, user, tenant: null, organizations: [] }   (a new person belongs to no school yet)
-  void Prisma; void argon2; void prisma; void HttpError;
-  throw new Error('TODO C6: signup');
+export async function signup(
+  input: SignupInput,
+  meta: ClientMeta,
+): Promise<AuthResult> {
+  const passwordHash = await argon2.hash(input.password);
+  try {
+    const user = await prisma.user.create({
+      data: {
+        email: input.email,
+        fullName: input.fullName,
+        passwordHash,
+        passwordChangedAt: new Date(),
+      },
+      select: {
+        id: true,
+        email: true,
+        fullName: true,
+        phone: true,
+        avatarUrl: true,
+      },
+    });
+
+    const session = await createSession({
+      userId: user.id,
+      tenantId: null,
+      meta,
+    });
+    return { session, user, tenant: null, organizations: [] };
+  } catch (e) {
+    if (
+      e instanceof Prisma.PrismaClientKnownRequestError &&
+      e.code === "P2002"
+    ) {
+      throw new HttpError(409, "An account with this email already exists");
+    }
+    throw e;
+  }
 }
 
 // ---------------------------------------------------------------- C7
-export async function login(input: LoginInput, meta: ClientMeta): Promise<AuthResult> {
+export async function login(
+  input: LoginInput,
+  meta: ClientMeta,
+): Promise<AuthResult> {
   // const invalid = () => new HttpError(401, 'Invalid email or password')   // SAME message for every failure
   // TODO 1: find the user: prisma.user.findFirst({ where: { email: input.email.toLowerCase(), deletedAt: null } })
   // TODO 2: password check WITHOUT revealing if the email exists:
@@ -49,13 +89,19 @@ export async function login(input: LoginInput, meta: ClientMeta): Promise<AuthRe
   //         const tenant = tenantId ? await loadTenantContext(user.id, tenantId) : null
   // TODO 6: const session = await createSession({ userId: user.id, tenantId: tenant?.id ?? null, meta })
   // TODO 7: return { session, user: {id, fullName, email, phone, avatarUrl}, tenant, organizations: await listMyOrganizations(user.id) }
-  void dummyHash; void pickTenantId; void loadTenantContext; void listMyOrganizations;
-  throw new Error('TODO C7: login');
+  void dummyHash;
+  void pickTenantId;
+  void loadTenantContext;
+  void listMyOrganizations;
+  throw new Error("TODO C7: login");
 }
 
 // ---------------------------------------------------------------- C9
 // cookieToken = req.cookies.rt (undefined when the cookie is missing)
-export async function refresh(cookieToken: string | undefined, meta: ClientMeta): Promise<AuthResult> {
+export async function refresh(
+  cookieToken: string | undefined,
+  meta: ClientMeta,
+): Promise<AuthResult> {
   // TODO 1: no cookie -> throw new HttpError(401, 'Unauthorized')
   // TODO 2: row = prisma.refreshToken.findUnique({ where: { tokenHash: sha256(cookieToken) } }); none -> 401
   // TODO 3: if row.revokedAt -> 401
@@ -69,8 +115,9 @@ export async function refresh(cookieToken: string | undefined, meta: ClientMeta)
   // TODO 7: load the user (status 'active', deletedAt null) or 401
   // TODO 8: keep row.tenantId if loadTenantContext(user.id, row.tenantId) is not null, else pickTenantId(user.id)
   // TODO 9: createSession({ userId, tenantId, meta, familyId: row.familyId }) and return like login
-  void sha256; void revokeFamily;
-  throw new Error('TODO C9: refresh');
+  void sha256;
+  void revokeFamily;
+  throw new Error("TODO C9: refresh");
 }
 
 export async function logout(cookieToken: string | undefined): Promise<void> {
@@ -93,8 +140,11 @@ export async function switchOrganization(
   // TODO 3: familyId: if cookieToken matches an UNUSED, UNREVOKED row of THIS user, claim it (same updateMany as refresh) and reuse its familyId;
   //         otherwise leave familyId undefined (new family)
   // TODO 4: session = createSession({ userId, tenantId, meta, familyId }); load the user; return like login
-  void userId; void slug; void cookieToken; void meta;
-  throw new Error('TODO C10c: switchOrganization');
+  void userId;
+  void slug;
+  void cookieToken;
+  void meta;
+  throw new Error("TODO C10c: switchOrganization");
 }
 
 // Revokes every refresh token of one login chain.
