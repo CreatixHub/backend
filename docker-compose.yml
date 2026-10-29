@@ -1,0 +1,15 @@
+# PostgreSQL for local development:  docker compose up -d
+services:
+  db:
+    image: postgres:16
+    container_name: karkaii-pg
+    environment:
+      POSTGRES_USER: karkaii
+      POSTGRES_PASSWORD: karkaii_dev
+      POSTGRES_DB: karkaii
+    ports:
+      - "5432:5432"
+    volumes:
+      - karkaii_pgdata:/var/lib/postgresql/data
+volumes:
+  karkaii_pgdata:
