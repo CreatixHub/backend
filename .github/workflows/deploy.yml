@@ -103,7 +103,9 @@ jobs:
           cd "$APP"
           npm ci --omit=dev --no-audit --no-fund --silent
           node node_modules/prisma/build/index.js generate >/dev/null
-          sudo systemctl restart "$SERVICE"
+          # A failing migration or seed makes `restart` itself fail. Do not stop here: fall through to the
+          # health check so the rollback below always runs.
+          sudo systemctl restart "$SERVICE" || echo "systemctl restart reported a failure - checking health anyway" >&2
 
           if healthy; then
             echo "Released."
@@ -111,7 +113,7 @@ jobs:
             echo "API did not become healthy - rolling back to the previous release." >&2
             journalctl -u "$SERVICE" -n 60 --no-pager >&2 || true
             rsync -a --delete "$STAGE/prev/" "$APP/"
-            sudo systemctl restart "$SERVICE"
+            sudo systemctl restart "$SERVICE" || true
             healthy || echo "The previous release is not healthy either - check: journalctl -u $SERVICE" >&2
             exit 1
           fi

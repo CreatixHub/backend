@@ -10,6 +10,8 @@ const schema = z.object({
   PORT: z.coerce.number().int().positive().default(5000),
   CORS_ORIGINS: z.string().optional(), // comma separated list of allowed browser origins
   COOKIE_SECURE: z.enum(["true", "false"]).default("false").transform((v) => v === "true"),
+  NODE_ENV: z.string().optional(), // "production" on the server
+  DOCS_ENABLED: z.enum(["true", "false"]).optional(), // API docs at /api/docs; default: on, except when NODE_ENV=production
 });
 
 // Fail fast with a readable message instead of crashing later with "undefined".

@@ -12,6 +12,7 @@ import { errorHandler } from "./middleware/errorHandler";
 import { publicAuthRouter } from "./modules/auth/auth.routes";
 import { authenticate } from "./middleware/authenticate";
 import { privateAuthRouter } from "./modules/auth/auth.routes";
+import { docsEnabled, docsRouter } from "./docs/docs.routes";
 import { membersRouter } from "./modules/members/members.routes";
 import { organizationsRouter } from "./modules/organizations/organizations.routes";
 import { permissionsRouter, rolesRouter } from "./modules/roles/roles.routes";
@@ -35,6 +36,9 @@ export function createApp() {
       legacyHeaders: false,
     }),
   ); // 100 req/min/IP
+
+  // ---- API documentation: /api/docs (Swagger UI) and /api/openapi.json. Public, so BEFORE authenticate; off in production. ----
+  if (docsEnabled) app.use("/api", docsRouter());
 
   // ---- PUBLIC routes (registered BEFORE authenticate, which you add in C8) ----
   app.get("/api/health", async (_req, res) => {
