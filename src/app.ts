@@ -14,7 +14,6 @@ import { authenticate } from "./middleware/authenticate";
 import { privateAuthRouter } from "./modules/auth/auth.routes";
 import { docsEnabled, docsRouter } from "./docs/docs.routes";
 import { membersRouter } from "./modules/members/members.routes";
-import { membersTestRouter } from "./modules/members/members.test.routes.ts";
 import { organizationsRouter } from "./modules/organizations/organizations.routes";
 import { permissionsRouter, rolesRouter } from "./modules/roles/roles.routes";
 
@@ -46,8 +45,6 @@ export function createApp() {
     await prisma.$queryRaw`SELECT 1`; // proves the database connection works
     ok(res, { status: "ok" });
   });
-
-  app.use("/test", membersTestRouter);
 
   // ---- UNCOMMENT each line when its chapter's code is finished (and add the imports at the top) ----
   app.use("/api/auth", publicAuthRouter); // signup, login, refresh, logout  (public)
