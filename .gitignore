@@ -8,6 +8,7 @@ release/
 !env.template
 
 .pgdata/
+.docs/
 *.log
 
 # local test helpers that hold passwords, tokens or cookies
