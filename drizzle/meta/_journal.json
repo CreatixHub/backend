@@ -8,6 +8,20 @@
       "when": 1794379868935,
       "tag": "0000_complete_true_believers",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1794394183030,
+      "tag": "0001_perpetual_chronomancer",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794396223385,
+      "tag": "0002_eminent_kang",
+      "breakpoints": true
     }
   ]
 }

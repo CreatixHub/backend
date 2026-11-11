@@ -1,0 +1,67 @@
+CREATE TABLE "staff" (
+	"id" bigserial PRIMARY KEY NOT NULL,
+	"tenant_id" bigint NOT NULL,
+	"branch_id" bigint,
+	"employee_no" text NOT NULL,
+	"user_id" bigint,
+	"staff_type" text NOT NULL,
+	"employment_type" text NOT NULL,
+	"department_id" bigint,
+	"designation_id" bigint,
+	"reports_to_id" bigint,
+	"status" text DEFAULT 'active' NOT NULL,
+	"first_name" text,
+	"last_name" text,
+	"full_name" text,
+	"dob" date,
+	"gender" text,
+	"blood_group" text,
+	"marital_status" text,
+	"father_name" text,
+	"mother_tongue_id" bigint,
+	"email" text,
+	"phone" text,
+	"alt_phone" text,
+	"address_line1" text,
+	"address_line2" text,
+	"city_id" bigint,
+	"postal_code" text,
+	"permanent_address_same" boolean DEFAULT false NOT NULL,
+	"permanent_address_line1" text,
+	"permanent_address_line2" text,
+	"permanent_city_id" bigint,
+	"permanent_postal_code" text,
+	"joined_on" date NOT NULL,
+	"probation_ends_on" date,
+	"confirmed_on" date,
+	"left_on" date,
+	"left_reason" text,
+	"qualification" text,
+	"experience_years" numeric(4, 1),
+	"national_id_enc" text,
+	"pan_enc" text,
+	"epf_no" text,
+	"bank_account_name" text,
+	"bank_name" text,
+	"bank_branch" text,
+	"bank_ifsc" text,
+	"bank_micr" text,
+	"bank_account_enc" text,
+	"emergency_contact_name" text,
+	"emergency_contact_phone" text,
+	"photo_file_id" bigint,
+	"social_links" jsonb DEFAULT '{}'::jsonb NOT NULL,
+	"created_at" timestamp (6) with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+	"updated_at" timestamp (6) with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+	"deleted_at" timestamp (6) with time zone,
+	"deleted_by" bigint
+);
+--> statement-breakpoint
+ALTER TABLE "staff" ADD CONSTRAINT "staff_tenant_id_organizations_id_fk" FOREIGN KEY ("tenant_id") REFERENCES "public"."organizations"("id") ON DELETE restrict ON UPDATE cascade;--> statement-breakpoint
+ALTER TABLE "staff" ADD CONSTRAINT "staff_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE set null ON UPDATE cascade;--> statement-breakpoint
+ALTER TABLE "staff" ADD CONSTRAINT "staff_reports_to_id_staff_id_fk" FOREIGN KEY ("reports_to_id") REFERENCES "public"."staff"("id") ON DELETE set null ON UPDATE cascade;--> statement-breakpoint
+ALTER TABLE "staff" ADD CONSTRAINT "staff_deleted_by_users_id_fk" FOREIGN KEY ("deleted_by") REFERENCES "public"."users"("id") ON DELETE set null ON UPDATE cascade;--> statement-breakpoint
+CREATE UNIQUE INDEX "staff_tenant_id_employee_no_key" ON "staff" USING btree ("tenant_id","employee_no");--> statement-breakpoint
+CREATE INDEX "staff_tenant_id_status_idx" ON "staff" USING btree ("tenant_id","status");--> statement-breakpoint
+CREATE INDEX "staff_user_id_idx" ON "staff" USING btree ("user_id");--> statement-breakpoint
+CREATE INDEX "staff_reports_to_id_idx" ON "staff" USING btree ("reports_to_id");

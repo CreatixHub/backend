@@ -19,6 +19,8 @@ import { docsEnabled, docsRouter } from "./docs/docs.routes";
 import { membersRouter } from "./modules/members/members.routes";
 import { organizationsRouter } from "./modules/organizations/organizations.routes";
 import { permissionsRouter, rolesRouter } from "./modules/roles/roles.routes";
+import { staffRouter } from "./modules/staff/staff.routes";
+import { subjectsRouter } from "./modules/subjects/subjects.routes";
 
 // Building the app in a function (instead of starting the server here) lets tests use it too.
 // The ORDER of the lines below is the security design: Express runs them top to bottom.
@@ -58,13 +60,14 @@ export function createApp() {
 
   // ---- UNCOMMENT each line when its chapter's code is finished (and add the imports at the top) ----
   app.use("/api/auth", publicAuthRouter); // signup, login, refresh, logout  (public)
-
-  app.use("/api", authenticate); // THE DIVIDING LINE: everything below needs a signed-in person
+app.use("/api", authenticate); // THE DIVIDING LINE: everything below needs a signed-in person
   app.use("/api/auth", privateAuthRouter); // me, switch-organization
   app.use("/api/organizations", organizationsRouter);
   app.use("/api/members", membersRouter);
   app.use("/api/roles", rolesRouter);
   app.use("/api/permissions", permissionsRouter);
+  app.use("/api/staff", staffRouter);
+  app.use("/api/subjects", subjectsRouter);
 
   app.use((_req, _res, next) => next(new HttpError(404, "Not found"))); // nothing matched
   app.use(errorHandler); // must be the very last line
