@@ -15,6 +15,7 @@ import {
   timestamp,
   uniqueIndex,
   uuid,
+  smallint,
 } from "drizzle-orm/pg-core";
 // Every bigint/bigserial id column uses { mode: "bigint" } so the app keeps working with real JS BigInt
 // values everywhere (lib/bigint.ts already teaches JSON.stringify to serialize them) - same shape the
@@ -310,6 +311,117 @@ export const subjects = pgTable(
   ],
 );
 
+// Classes, sections and classrooms (spec section 5). branch_id is optional because the branches table is not built yet.
+export const classes = pgTable(
+  "classes",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    branchId: plainBigint("branch_id"),
+    gradeLevel: smallint("grade_level").notNull(), // numeric order for sorting, e.g. 1-12
+    name: text("name").notNull(), // e.g. "Grade 10"
+    code: text("code").notNull(),
+    stream: text("stream"), // e.g. Science / Commerce / Arts, for senior grades
+    category: text("category"),
+    displayOrder: smallint("display_order").notNull().default(0),
+    status: text("status").notNull().default("active"), // active | inactive
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    deletedAt: ts("deleted_at"),
+    deletedBy: plainBigint("deleted_by").references(() => users.id, { onDelete: "set null", onUpdate: "cascade" }),
+  },
+  (t) => [
+    uniqueIndex("classes_tenant_id_code_key").on(t.tenantId, t.code).where(sql`${t.deletedAt} IS NULL`),
+    index("classes_tenant_id_status_idx").on(t.tenantId, t.status),
+  ],
+);
+
+export const classrooms = pgTable(
+  "classrooms",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    branchId: plainBigint("branch_id"),
+    code: text("code").notNull(),
+    name: text("name"),
+    building: text("building"),
+    floor: smallint("floor"),
+    capacity: smallint("capacity"),
+    roomType: text("room_type").notNull().default("classroom"), // classroom | lab | hall | staff_room | other
+    status: text("status").notNull().default("active"),
+    facilities: text("facilities").array().notNull().default(sql`'{}'::text[]`), // e.g. projector, ac, smartboard
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    deletedAt: ts("deleted_at"),
+    deletedBy: plainBigint("deleted_by").references(() => users.id, { onDelete: "set null", onUpdate: "cascade" }),
+  },
+  (t) => [
+    uniqueIndex("classrooms_tenant_id_code_key").on(t.tenantId, t.code).where(sql`${t.deletedAt} IS NULL`),
+  ],
+);
+
+export const sections = pgTable(
+  "sections",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    classId: plainBigint("class_id")
+      .notNull()
+      .references(() => classes.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    name: text("name").notNull(), // e.g. "A"
+    capacity: smallint("capacity").notNull(),
+    defaultClassroomId: plainBigint("default_classroom_id").references(() => classrooms.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    shift: text("shift").notNull().default("morning"), // morning | afternoon | evening
+    medium: text("medium"), // language of instruction
+    status: text("status").notNull().default("active"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    deletedAt: ts("deleted_at"),
+    deletedBy: plainBigint("deleted_by").references(() => users.id, { onDelete: "set null", onUpdate: "cascade" }),
+  },
+  (t) => [
+    uniqueIndex("sections_class_id_name_key").on(t.classId, t.name).where(sql`${t.deletedAt} IS NULL`),
+    index("sections_tenant_id_class_id_idx").on(t.tenantId, t.classId),
+  ],
+);
+
+// Which subjects a class teaches, and the marks setup for each (spec section 4).
+export const classSubjects = pgTable(
+  "class_subjects",
+  {
+    classId: plainBigint("class_id")
+      .notNull()
+      .references(() => classes.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    subjectId: plainBigint("subject_id")
+      .notNull()
+      .references(() => subjects.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    isElective: boolean("is_elective").notNull().default(false),
+    periodsPerWeek: smallint("periods_per_week"),
+    displayOrder: smallint("display_order").notNull().default(0),
+    examMarks: numeric("exam_marks", { precision: 6, scale: 2 }).notNull(),
+    internalMarks: numeric("internal_marks", { precision: 6, scale: 2 }).notNull(),
+    passMarks: numeric("pass_marks", { precision: 6, scale: 2 }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.classId, t.subjectId] }),
+    index("class_subjects_tenant_id_idx").on(t.tenantId),
+  ],
+);
+
 export const organizationsRelations = relations(organizations, ({ many }) => ({
   memberships: many(memberships),
   roles: many(roles),
@@ -369,4 +481,20 @@ export const staffRelations = relations(staff, ({ one }) => ({
 
 export const subjectsRelations = relations(subjects, ({ one }) => ({
   tenant: one(organizations, { fields: [subjects.tenantId], references: [organizations.id] }),
+}));
+
+export const classesRelations = relations(classes, ({ one, many }) => ({
+  tenant: one(organizations, { fields: [classes.tenantId], references: [organizations.id] }),
+  sections: many(sections),
+  classSubjects: many(classSubjects),
+}));
+
+export const sectionsRelations = relations(sections, ({ one }) => ({
+  class: one(classes, { fields: [sections.classId], references: [classes.id] }),
+  defaultClassroom: one(classrooms, { fields: [sections.defaultClassroomId], references: [classrooms.id] }),
+}));
+
+export const classSubjectsRelations = relations(classSubjects, ({ one }) => ({
+  class: one(classes, { fields: [classSubjects.classId], references: [classes.id] }),
+  subject: one(subjects, { fields: [classSubjects.subjectId], references: [subjects.id] }),
 }));

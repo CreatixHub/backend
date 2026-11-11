@@ -21,6 +21,7 @@ import { organizationsRouter } from "./modules/organizations/organizations.route
 import { permissionsRouter, rolesRouter } from "./modules/roles/roles.routes";
 import { staffRouter } from "./modules/staff/staff.routes";
 import { subjectsRouter } from "./modules/subjects/subjects.routes";
+import { classesRouter, sectionsRouter } from "./modules/classes/classes.routes";
 
 // Building the app in a function (instead of starting the server here) lets tests use it too.
 // The ORDER of the lines below is the security design: Express runs them top to bottom.
@@ -68,6 +69,8 @@ app.use("/api", authenticate); // THE DIVIDING LINE: everything below needs a si
   app.use("/api/permissions", permissionsRouter);
   app.use("/api/staff", staffRouter);
   app.use("/api/subjects", subjectsRouter);
+  app.use("/api/classes", classesRouter);
+app.use("/api/sections", sectionsRouter);
 
   app.use((_req, _res, next) => next(new HttpError(404, "Not found"))); // nothing matched
   app.use(errorHandler); // must be the very last line
