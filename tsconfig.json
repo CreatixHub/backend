@@ -11,5 +11,5 @@
     "resolveJsonModule": true,
     "noEmit": true
   },
-  "include": ["src", "prisma", "tests", "vitest.config.ts"]
+  "include": ["src", "scripts", "tests", "vitest.config.ts", "drizzle.config.ts"]
 }

@@ -1,6 +1,7 @@
-import { Prisma } from '@prisma/client';
 import * as argon2 from 'argon2';
-import { prisma } from '../../db';
+import { and, asc, count, eq, inArray, ilike, ne, or } from 'drizzle-orm';
+import { db } from '../../db';
+import { membershipRoles, memberships, roles, users } from '../../db/schema';
 import { HttpError } from '../../lib/errors';
 import type { TenantContext } from '../../lib/tenant';
 import type { AuthUser } from '../../middleware/authenticate';
@@ -10,92 +11,144 @@ import type { AddMemberInput, ListMembersInput, UpdateMemberInput } from './memb
 // RULES for every function: every query has tenantId = tenant.id (from the VERIFIED token), and roles are
 // looked up INSIDE this school only.
 
-const MEMBER_SELECT = {
-  id: true,
-  userId: true,
-  status: true,
-  createdAt: true,
-  user: { select: { fullName: true, email: true, phone: true } },
-  roles: { select: { role: { select: { code: true } } } },
-} satisfies Prisma.MembershipSelect;
+const UNIQUE_VIOLATION = '23505';
+function isUniqueViolation(e: unknown): boolean {
+  return typeof e === 'object' && e !== null && 'code' in e && (e as { code: unknown }).code === UNIQUE_VIOLATION;
+}
 
-type MemberRow = Prisma.MembershipGetPayload<{ select: typeof MEMBER_SELECT }>;
+interface MemberRow {
+  id: bigint;
+  userId: bigint;
+  fullName: string;
+  email: string;
+  phone: string | null;
+  status: string;
+  createdAt: Date;
+  roleCodes: string[];
+}
 
 const toMember = (m: MemberRow) => ({
   id: m.id,
   userId: m.userId,
-  name: m.user.fullName,
-  email: m.user.email,
-  phone: m.user.phone,
+  name: m.fullName,
+  email: m.email,
+  phone: m.phone,
   status: m.status,
-  roles: m.roles.map((r) => r.role.code),
+  roles: m.roleCodes,
   createdAt: m.createdAt,
 });
+
+// Fetches a batch of membership rows (with user info and role codes) by membership id.
+async function loadMembers(membershipIds: bigint[]): Promise<Map<bigint, MemberRow>> {
+  if (membershipIds.length === 0) return new Map();
+  const base = await db
+    .select({
+      id: memberships.id,
+      userId: memberships.userId,
+      fullName: users.fullName,
+      email: users.email,
+      phone: users.phone,
+      status: memberships.status,
+      createdAt: memberships.createdAt,
+    })
+    .from(memberships)
+    .innerJoin(users, eq(memberships.userId, users.id))
+    .where(inArray(memberships.id, membershipIds));
+
+  const roleRows = await db
+    .select({ membershipId: membershipRoles.membershipId, code: roles.code })
+    .from(membershipRoles)
+    .innerJoin(roles, eq(membershipRoles.roleId, roles.id))
+    .where(inArray(membershipRoles.membershipId, membershipIds));
+  const rolesByMembership = new Map<bigint, string[]>();
+  for (const r of roleRows) {
+    const list = rolesByMembership.get(r.membershipId) ?? [];
+    list.push(r.code);
+    rolesByMembership.set(r.membershipId, list);
+  }
+
+  const result = new Map<bigint, MemberRow>();
+  for (const row of base) {
+    result.set(row.id, { ...row, roleCodes: rolesByMembership.get(row.id) ?? [] });
+  }
+  return result;
+}
+
+async function loadMember(membershipId: bigint): Promise<MemberRow | undefined> {
+  return (await loadMembers([membershipId])).get(membershipId);
+}
 
 const isOwner = (tenant: TenantContext) => tenant.roles.includes('owner');
 
 // Looks role codes up INSIDE the caller's school: you can never assign another school's role.
 async function resolveRoles(tenantId: bigint, codes: string[]) {
   const unique = [...new Set(codes)];
-  const roles = await prisma.role.findMany({ where: { tenantId, code: { in: unique } }, select: { id: true, code: true } });
-  const missing = unique.filter((c) => !roles.some((r) => r.code === c));
+  const found = await db
+    .select({ id: roles.id, code: roles.code })
+    .from(roles)
+    .where(and(eq(roles.tenantId, tenantId), inArray(roles.code, unique)));
+  const missing = unique.filter((c) => !found.some((r) => r.code === c));
   if (missing.length) throw new HttpError(400, `Unknown role: ${missing.join(', ')}`);
-  return roles;
+  return found;
 }
 
 export async function listMembers(
   tenant: TenantContext,
   q: ListMembersInput,
 ): Promise<{ rows: unknown[]; meta: { page: number; limit: number; total: number; pages: number } }> {
-  const where: Prisma.MembershipWhereInput = {
-    tenantId: tenant.id,
-    ...(q.q
-      ? {
-          user: {
-            is: {
-              OR: [
-                { fullName: { contains: q.q, mode: 'insensitive' } },
-                { email: { contains: q.q, mode: 'insensitive' } },
-              ],
-            },
-          },
-        }
-      : {}),
-  };
-  const [rows, total] = await prisma.$transaction([
-    prisma.membership.findMany({
-      where,
-      select: MEMBER_SELECT,
-      orderBy: { id: 'asc' },
-      skip: (q.page - 1) * q.limit,
-      take: q.limit,
-    }),
-    prisma.membership.count({ where }),
+  const where = and(
+    eq(memberships.tenantId, tenant.id),
+    q.q
+      ? or(ilike(users.fullName, `%${q.q}%`), ilike(users.email, `%${q.q}%`))
+      : undefined,
+  );
+
+  const [idRows, [{ total }]] = await Promise.all([
+    db
+      .select({ id: memberships.id })
+      .from(memberships)
+      .innerJoin(users, eq(memberships.userId, users.id))
+      .where(where)
+      .orderBy(asc(memberships.id))
+      .offset((q.page - 1) * q.limit)
+      .limit(q.limit),
+    db
+      .select({ total: count() })
+      .from(memberships)
+      .innerJoin(users, eq(memberships.userId, users.id))
+      .where(where),
   ]);
-  return { rows: rows.map(toMember), meta: { page: q.page, limit: q.limit, total, pages: Math.ceil(total / q.limit) } };
+
+  const membersById = await loadMembers(idRows.map((r) => r.id));
+  const rows = idRows.map((r) => toMember(membersById.get(r.id)!));
+  return { rows, meta: { page: q.page, limit: q.limit, total, pages: Math.ceil(total / q.limit) } };
 }
 
 export async function addMember(tenant: TenantContext, _actor: AuthUser, input: AddMemberInput): Promise<unknown> {
-  const roles = await resolveRoles(tenant.id, input.roles);
-  if (roles.some((r) => r.code === 'owner') && !isOwner(tenant)) {
+  const roleRows = await resolveRoles(tenant.id, input.roles);
+  if (roleRows.some((r) => r.code === 'owner') && !isOwner(tenant)) {
     throw new HttpError(403, 'Only an owner can make someone an owner');
   }
-  const roleLinks = roles.map((r) => ({ roleId: r.id, tenantId: tenant.id }));
 
   try {
-    const existing = await prisma.user.findUnique({ where: { email: input.email }, select: { id: true } });
+    const [existing] = await db.select({ id: users.id }).from(users).where(eq(users.email, input.email)).limit(1);
 
     if (existing) {
-      const already = await prisma.membership.findUnique({
-        where: { tenantId_userId: { tenantId: tenant.id, userId: existing.id } },
-        select: { id: true },
-      });
+      const [already] = await db
+        .select({ id: memberships.id })
+        .from(memberships)
+        .where(and(eq(memberships.tenantId, tenant.id), eq(memberships.userId, existing.id)))
+        .limit(1);
       if (already) throw new HttpError(409, 'This person is already a member of this school');
-      const created = await prisma.membership.create({
-        data: { tenantId: tenant.id, userId: existing.id, roles: { create: roleLinks } },
-        select: MEMBER_SELECT,
-      });
-      return toMember(created);
+
+      const [membership] = await db
+        .insert(memberships)
+        .values({ tenantId: tenant.id, userId: existing.id })
+        .returning({ id: memberships.id });
+      await db
+        .insert(membershipRoles)
+        .values(roleRows.map((r) => ({ membershipId: membership.id, roleId: r.id, tenantId: tenant.id })));
+      return toMember((await loadMember(membership.id))!);
     }
 
     // No account yet: the admin creates it, so name and a temporary password are required.
@@ -105,19 +158,23 @@ export async function addMember(tenant: TenantContext, _actor: AuthUser, input: 
     if (errors.length) throw new HttpError(400, 'Validation failed', errors);
 
     const passwordHash = await argon2.hash(input.password!);
-    const created = await prisma.$transaction(async (tx) => {
-      const user = await tx.user.create({
-        data: { email: input.email, fullName: input.fullName!, passwordHash, passwordChangedAt: new Date() },
-        select: { id: true },
-      });
-      return tx.membership.create({
-        data: { tenantId: tenant.id, userId: user.id, roles: { create: roleLinks } },
-        select: MEMBER_SELECT,
-      });
+    const membershipId = await db.transaction(async (tx) => {
+      const [user] = await tx
+        .insert(users)
+        .values({ email: input.email, fullName: input.fullName!, passwordHash, passwordChangedAt: new Date() })
+        .returning({ id: users.id });
+      const [membership] = await tx
+        .insert(memberships)
+        .values({ tenantId: tenant.id, userId: user.id })
+        .returning({ id: memberships.id });
+      await tx
+        .insert(membershipRoles)
+        .values(roleRows.map((r) => ({ membershipId: membership.id, roleId: r.id, tenantId: tenant.id })));
+      return membership.id;
     });
-    return toMember(created);
+    return toMember((await loadMember(membershipId))!);
   } catch (e) {
-    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+    if (isUniqueViolation(e)) {
       throw new HttpError(409, 'This person is already a member of this school');
     }
     throw e;
@@ -126,22 +183,39 @@ export async function addMember(tenant: TenantContext, _actor: AuthUser, input: 
 
 // Shared guards for changing or removing someone: not yourself, owner rules, and a school keeps >= 1 active owner.
 async function loadTarget(tenant: TenantContext, actor: AuthUser, membershipId: bigint) {
-  const target = await prisma.membership.findFirst({
-    where: { id: membershipId, tenantId: tenant.id },
-    select: { userId: true, status: true, roles: { select: { role: { select: { code: true } } } } },
-  });
+  const [target] = await db
+    .select({ id: memberships.id, userId: memberships.userId, status: memberships.status })
+    .from(memberships)
+    .where(and(eq(memberships.id, membershipId), eq(memberships.tenantId, tenant.id)))
+    .limit(1);
   if (!target) throw new HttpError(404, 'Member not found');
   if (target.userId === actor.id) throw new HttpError(400, 'You cannot change your own access');
-  const targetIsOwner = target.roles.some((r) => r.role.code === 'owner');
+
+  const roleCodes = await db
+    .select({ code: roles.code })
+    .from(membershipRoles)
+    .innerJoin(roles, eq(membershipRoles.roleId, roles.id))
+    .where(eq(membershipRoles.membershipId, membershipId));
+  const targetIsOwner = roleCodes.some((r) => r.code === 'owner');
   if (targetIsOwner && !isOwner(tenant)) throw new HttpError(403, 'Only an owner can change an owner');
   return { target, targetIsOwner };
 }
 
 async function assertKeepsAnOwner(tenantId: bigint, membershipId: bigint) {
-  const others = await prisma.membership.count({
-    where: { tenantId, status: 'active', id: { not: membershipId }, roles: { some: { role: { code: 'owner' } } } },
-  });
-  if (others < 1) throw new HttpError(400, 'A school needs at least one active owner');
+  const [{ total }] = await db
+    .select({ total: count() })
+    .from(memberships)
+    .innerJoin(membershipRoles, eq(membershipRoles.membershipId, memberships.id))
+    .innerJoin(roles, eq(membershipRoles.roleId, roles.id))
+    .where(
+      and(
+        eq(memberships.tenantId, tenantId),
+        eq(memberships.status, 'active'),
+        ne(memberships.id, membershipId),
+        eq(roles.code, 'owner'),
+      ),
+    );
+  if (total < 1) throw new HttpError(400, 'A school needs at least one active owner');
 }
 
 export async function updateMember(
@@ -160,26 +234,22 @@ export async function updateMember(
   const willBeActive = (input.status ?? target.status) === 'active';
   if (targetIsOwner && !(willBeOwner && willBeActive)) await assertKeepsAnOwner(tenant.id, membershipId);
 
-  await prisma.$transaction(async (tx) => {
-    if (input.status) await tx.membership.update({ where: { id: membershipId }, data: { status: input.status } });
+  await db.transaction(async (tx) => {
+    if (input.status) await tx.update(memberships).set({ status: input.status }).where(eq(memberships.id, membershipId));
     if (newRoles) {
-      await tx.membershipRole.deleteMany({ where: { membershipId } });
-      await tx.membershipRole.createMany({
-        data: newRoles.map((r) => ({ membershipId, roleId: r.id, tenantId: tenant.id })),
-      });
+      await tx.delete(membershipRoles).where(eq(membershipRoles.membershipId, membershipId));
+      await tx
+        .insert(membershipRoles)
+        .values(newRoles.map((r) => ({ membershipId, roleId: r.id, tenantId: tenant.id })));
     }
   });
 
-  const updated = await prisma.membership.findFirstOrThrow({
-    where: { id: membershipId, tenantId: tenant.id },
-    select: MEMBER_SELECT,
-  });
-  return toMember(updated);
+  return toMember((await loadMember(membershipId))!);
 }
 
 export async function removeMember(tenant: TenantContext, actor: AuthUser, membershipId: bigint): Promise<void> {
   const { targetIsOwner } = await loadTarget(tenant, actor, membershipId);
   if (targetIsOwner) await assertKeepsAnOwner(tenant.id, membershipId);
   // the person's account stays (they may belong to other schools); only this membership goes, its role links cascade
-  await prisma.membership.delete({ where: { id: membershipId } });
+  await db.delete(memberships).where(eq(memberships.id, membershipId));
 }
