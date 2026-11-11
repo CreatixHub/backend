@@ -1,6 +1,6 @@
 # Karkaii API (backend)
 
-Multi-school ERP backend. Node.js 22 + Express 5 + TypeScript + Prisma 6 + PostgreSQL.
+Multi-school ERP backend. Node.js 22 + Express 5 + TypeScript + Drizzle ORM + PostgreSQL.
 
 **This is not a starter kit anymore** — auth, multi-tenancy (one account, many schools) and role/permission
 checks are already built and working. If you're new to this stack, read this file top to bottom before
@@ -28,7 +28,7 @@ exists to support — keep it in mind and the rest of this doc makes sense.
 | HTTP server | Express 5 | Minimal, everyone's seen it before, easy to reason about top-to-bottom. |
 | Language | TypeScript | Catches "undefined is not a function" at compile time, not in production. |
 | Database | PostgreSQL 16 (Docker locally) | Relational — schools/users/roles are inherently relational data. |
-| ORM | Prisma 6 | **Being migrated to Drizzle ORM** — see the note below. Don't learn Prisma's schema syntax deeply. |
+| ORM | Drizzle ORM + `pg` (node-postgres) | TypeScript-first, no separate query-engine process, close to raw SQL. |
 | Passwords | `argon2` | The current best-practice password hash (not bcrypt, not plain SHA). |
 | Access tokens | `jsonwebtoken` (JWT) | Short-lived, stateless, verified without hitting the DB for the signature itself. |
 | Validation | `zod` | Every request body is parsed through a schema before it touches business logic. |
@@ -38,10 +38,13 @@ exists to support — keep it in mind and the rest of this doc makes sense.
 | Linting / formatting | `eslint` (flat config) + `prettier` | `npm run lint` / `npm run format` — run before committing. |
 | Tests | `vitest` + `supertest` | `npm test` — real HTTP requests against `createApp()`, no mocking, needs a running database. |
 
-> **Heads up — ORM migration in progress.** The 9-table auth/tenant foundation below is still on Prisma, but
-> the project is moving to **Drizzle ORM** before the rest of the modules (students, fees, timetable, …) get
-> built. If you're starting fresh, ask what the current state of that migration is before writing new
-> `prisma/schema.prisma` models — you may be working in Drizzle already by the time you read this.
+> **Migrated from Prisma to Drizzle on 2026-11-11** (before the 14 upcoming modules — students, fees,
+> timetable, … — landed on top of the auth/tenant foundation, the cheapest point to switch). The schema lives
+> in `src/db/schema.ts`, migrations in `drizzle/`. If you're setting up a **brand-new, empty** database, just
+> run `npm run db:migrate`. If you're pointing at a database that still has these 9 tables from the old Prisma
+> setup (a teammate's existing local DB, the parked Supabase instance), run
+> `npx tsx scripts/baseline-drizzle-migration.ts` once first — it marks the initial migration as already
+> applied without re-running its `CREATE TABLE` statements (which would fail with "already exists").
 
 ## 3. Project layout
 
@@ -58,7 +61,9 @@ backend/
 │   │                                  by this AND by the tests, so tests never need a real network port
 │   ├── config.ts                   — reads and validates every .env variable with zod; crashes on boot with a
 │   │                                  readable message if one is missing, instead of failing later with `undefined`
-│   ├── db.ts                       — the one shared Prisma client every module imports
+│   ├── db.ts                       — the one shared `pg` Pool + Drizzle instance every module imports
+│   ├── db/schema.ts                — every table, column, index and foreign key - the single source of truth
+│   │                                  (drizzle-kit generates drizzle/*.sql migrations from this file)
 │   ├── permissions.ts              — the full permission catalogue: MODULES × ACTIONS → `module.action` codes,
 │   │                                  and DEFAULT_ROLES (owner/admin/teacher/…) as named bundles of those codes
 │   ├── seed.ts                     — CLI script (`npm run db:seed`): loads the permission catalogue into the
@@ -99,8 +104,8 @@ backend/
 │   │   ├── errors.ts               — the `HttpError` class (status + message + optional field errors)
 │   │   ├── respond.ts              — `ok()` / `created()` / `noContent()` — the one response envelope shape
 │   │   ├── hash.ts                 — sha256 helper, used to hash refresh tokens before they touch the database
-│   │   ├── bigint.ts               — teaches `JSON.stringify` to serialize BigInt ids (Prisma uses BigInt for
-│   │   │                              every primary key; plain JSON.stringify throws on those without this)
+│   │   ├── bigint.ts               — teaches `JSON.stringify` to serialize BigInt ids (src/db/schema.ts uses
+│   │   │                              `{ mode: "bigint" }` for every primary key; plain JSON.stringify throws on those without this)
 │   │   └── logger.ts               — the shared `pino` logger instance (pretty-printed in dev, plain JSON in prod)
 │   │
 │   ├── docs/                       — OpenAPI/Swagger generation (this is application code, not reference material)
@@ -111,9 +116,9 @@ backend/
 │   └── types/
 │       └── express.d.ts            — augments Express's own `Request` type with `req.user` / `req.tenant`
 │
-├── prisma/
-│   ├── schema.prisma               — the 9-table auth/tenant schema (see the ORM migration note above)
-│   └── migrations/                 — one timestamped folder per migration, plus migration_lock.toml
+├── drizzle/                         — generated migration SQL (drizzle-kit generate) - never hand-edit these
+│   ├── 0000_complete_true_believers.sql
+│   └── meta/                       — drizzle-kit's own bookkeeping (_journal.json, snapshots)
 │
 ├── tests/                          — vitest + supertest, real HTTP calls against createApp(), no mocking
 │   ├── setup.ts                    — raises the auth rate limit and silences logs for the test run (runs before
@@ -125,7 +130,9 @@ backend/
 ├── scripts/
 │   ├── check-all.sh                — 60 end-to-end checks against a LIVE running API (not vitest - needs
 │   │                                  `./demo.sh up` first); never deletes data, safe to re-run
-│   └── demo-api.sh                 — scripted curl walkthrough of the main API flows, for manual exploration
+│   ├── demo-api.sh                 — scripted curl walkthrough of the main API flows, for manual exploration
+│   └── baseline-drizzle-migration.ts — one-time step for a database that already has these tables from the
+│                                      old Prisma setup; see the ORM migration note above
 │
 ├── exercises/                      — empty (.gitkeep only); leftover from the original learning-curriculum
 │                                      scaffold, safe to delete now that the backend is actually built
@@ -135,6 +142,8 @@ backend/
 │   └── assets/jwt-flow-diagram.png — the diagram embedded in §5 below (kept here, not under docs/, so it's
 │                                      actually tracked by git and renders for anyone who clones the repo)
 ├── docker-compose.yml              — local PostgreSQL only (container `karkaii-pg`, port 5432)
+├── drizzle.config.ts               — tells drizzle-kit where the schema and migrations live, and which
+│                                      connection to use for them (DIRECT_URL, same reasoning as Supabase's)
 ├── env.template                    — copy to `.env`; documents every variable, local AND Supabase connection
 │                                      string shapes (see §4)
 ├── eslint.config.js                — flat ESLint config (typescript-eslint + eslint-config-prettier)
@@ -207,9 +216,10 @@ The code for all of this lives in exactly four files: `modules/auth/session.ts` 
 | `npm run build` / `npm start` | Compiles to `dist/` and runs the compiled JS (what production runs). |
 | `npm run typecheck` | TypeScript check with no build output — run this before committing. |
 | `npm test` | Runs the Vitest suite. |
-| `npm run db:migrate` | Applies Prisma migrations to your local database. |
+| `npm run db:generate` | Diffs `src/db/schema.ts` against the last migration and writes a new `drizzle/*.sql` file. |
+| `npm run db:migrate` | Applies any not-yet-applied `drizzle/*.sql` migrations to your database. |
 | `npm run db:seed` | Re-runs `src/seed.ts` (idempotent — safe to run again). |
-| `npm run db:studio` | Opens Prisma Studio, a GUI for browsing the local database. |
+| `npm run db:studio` | Opens Drizzle Studio, a GUI for browsing the local database. |
 
 ## 7. Where to go next
 

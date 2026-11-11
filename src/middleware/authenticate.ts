@@ -1,7 +1,9 @@
+import { and, eq, isNull } from 'drizzle-orm';
 import type { NextFunction, Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import { config } from '../config';
-import { prisma } from '../db';
+import { db } from '../db';
+import { users } from '../db/schema';
 import { HttpError } from '../lib/errors';
 import { loadTenantContext } from '../lib/tenant';
 import type { TenantContext } from '../lib/tenant';
@@ -46,10 +48,11 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
   }
 
   // 3. load the person on EVERY request, so disabling an account takes effect immediately
-  const user = await prisma.user.findFirst({
-    where: { id: BigInt(sub), status: 'active', deletedAt: null },
-    select: { id: true, email: true, fullName: true, phone: true, avatarUrl: true },
-  });
+  const [user] = await db
+    .select({ id: users.id, email: users.email, fullName: users.fullName, phone: users.phone, avatarUrl: users.avatarUrl })
+    .from(users)
+    .where(and(eq(users.id, BigInt(sub)), eq(users.status, 'active'), isNull(users.deletedAt)))
+    .limit(1);
   if (!user) throw new HttpError(401, 'Unauthorized');
 
   // 4. if the token names a school, the membership and the school must still be active

@@ -2,7 +2,8 @@ import type { Response } from "express";
 import jwt from "jsonwebtoken";
 import { randomBytes, randomUUID } from "node:crypto";
 import { config } from "../../config";
-import { prisma } from "../../db";
+import { db } from "../../db";
+import { refreshTokens } from "../../db/schema";
 import { sha256 } from "../../lib/hash";
 import { created, ok } from "../../lib/respond";
 import type { TenantContext } from "../../lib/tenant";
@@ -29,16 +30,14 @@ export async function createSession(args: {
   familyId?: string;
 }) {
   const refreshToken = randomBytes(48).toString("base64url");
-  await prisma.refreshToken.create({
-    data: {
-      userId: args.userId,
-      tenantId: args.tenantId,
-      familyId: args.familyId ?? randomUUID(),
-      tokenHash: sha256(refreshToken), // only the hash is stored
-      userAgent: args.meta.userAgent?.slice(0, 300),
-      ip: args.meta.ip,
-      expiresAt: new Date(Date.now() + config.REFRESH_TTL_DAYS * 86_400_000),
-    },
+  await db.insert(refreshTokens).values({
+    userId: args.userId,
+    tenantId: args.tenantId,
+    familyId: args.familyId ?? randomUUID(),
+    tokenHash: sha256(refreshToken), // only the hash is stored
+    userAgent: args.meta.userAgent?.slice(0, 300),
+    ip: args.meta.ip,
+    expiresAt: new Date(Date.now() + config.REFRESH_TTL_DAYS * 86_400_000),
   });
   return { accessToken: signAccessToken(args.userId, args.tenantId), refreshToken };
 }

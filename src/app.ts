@@ -4,9 +4,10 @@ import express from "express";
 import rateLimit from "express-rate-limit";
 import helmet from "helmet";
 import pinoHttp from "pino-http";
+import { sql } from "drizzle-orm";
 import "./lib/bigint"; // makes BigInt ids JSON-serializable
 import { config } from "./config";
-import { prisma } from "./db";
+import { db } from "./db";
 import { HttpError } from "./lib/errors";
 import { logger } from "./lib/logger";
 import { ok } from "./lib/respond";
@@ -51,7 +52,7 @@ export function createApp() {
 
   // ---- PUBLIC routes (registered BEFORE authenticate, which you add in C8) ----
   app.get("/api/health", async (_req, res) => {
-    await prisma.$queryRaw`SELECT 1`; // proves the database connection works
+    await db.execute(sql`SELECT 1`); // proves the database connection works
     ok(res, { status: "ok" });
   });
 

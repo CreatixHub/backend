@@ -1,6 +1,7 @@
-import { Prisma } from "@prisma/client";
 import * as argon2 from "argon2";
-import { prisma } from "../../db";
+import { and, eq, isNull } from "drizzle-orm";
+import { db } from "../../db";
+import { memberships, organizations, refreshTokens, users } from "../../db/schema";
 import { HttpError } from "../../lib/errors";
 import { sha256 } from "../../lib/hash";
 import {
@@ -27,6 +28,20 @@ export interface AuthResult {
   organizations: unknown[];
 }
 
+const PUBLIC_USER_COLUMNS = {
+  id: users.id,
+  email: users.email,
+  fullName: users.fullName,
+  phone: users.phone,
+  avatarUrl: users.avatarUrl,
+};
+
+// Postgres' own SQLSTATE for a unique-constraint violation (what Prisma called "P2002").
+const UNIQUE_VIOLATION = "23505";
+function isUniqueViolation(e: unknown): boolean {
+  return typeof e === "object" && e !== null && "code" in e && (e as { code: unknown }).code === UNIQUE_VIOLATION;
+}
+
 // Verified against when the email is unknown, so "unknown email" and "wrong password" take the same time.
 const dummyHash = argon2.hash("not-a-real-password");
 
@@ -40,21 +55,15 @@ export async function signup(
 ): Promise<AuthResult> {
   const passwordHash = await argon2.hash(input.password);
   try {
-    const user = await prisma.user.create({
-      data: {
+    const [user] = await db
+      .insert(users)
+      .values({
         email: input.email,
         fullName: input.fullName,
         passwordHash,
         passwordChangedAt: new Date(),
-      },
-      select: {
-        id: true,
-        email: true,
-        fullName: true,
-        phone: true,
-        avatarUrl: true,
-      },
-    });
+      })
+      .returning(PUBLIC_USER_COLUMNS);
 
     const session = await createSession({
       userId: user.id,
@@ -63,10 +72,7 @@ export async function signup(
     });
     return { session, user, tenant: null, organizations: [] };
   } catch (e) {
-    if (
-      e instanceof Prisma.PrismaClientKnownRequestError &&
-      e.code === "P2002"
-    ) {
+    if (isUniqueViolation(e)) {
       throw new HttpError(409, "An account with this email already exists");
     }
     throw e;
@@ -81,9 +87,11 @@ export async function login(
   const invalid = () => new HttpError(401, "Invalid email or password");
 
   // find the person by email
-  const user = await prisma.user.findFirst({
-    where: { email: input.email, deletedAt: null },
-  });
+  const [user] = await db
+    .select()
+    .from(users)
+    .where(and(eq(users.email, input.email), isNull(users.deletedAt)))
+    .limit(1);
 
   // check the password without revealing whether the email exists
   const passwordOk = user
@@ -97,12 +105,7 @@ export async function login(
   if (!user || !passwordOk || user.status !== "active") throw invalid();
 
   // record login
-  await prisma.user.update({
-    where: { id: user.id },
-    data: {
-      lastLoginAt: new Date(),
-    },
-  });
+  await db.update(users).set({ lastLoginAt: new Date() }).where(eq(users.id, user.id));
 
   // choose the school to start in (none yet for a new person)
   const tenantId = await pickTenantId(user.id, input.organization);
@@ -116,9 +119,9 @@ export async function login(
   });
 
   return {
-    session, 
+    session,
     user: {id: user.id, fullName: user.fullName, email: user.email, phone: user.phone, avatarUrl: user.avatarUrl},
-    tenant, 
+    tenant,
     organizations: await listMyOrganizations(user.id),
   };
 }
@@ -131,9 +134,11 @@ export async function refresh(
 ): Promise<AuthResult> {
   if (!cookieToken) throw new HttpError(401, "Unauthorized");
 
-  const row = await prisma.refreshToken.findUnique({
-    where: { tokenHash: sha256(cookieToken) },
-  });
+  const [row] = await db
+    .select()
+    .from(refreshTokens)
+    .where(eq(refreshTokens.tokenHash, sha256(cookieToken)))
+    .limit(1);
   if (!row || row.revokedAt) throw new HttpError(401, "Unauthorized");
 
   if (row.usedAt) {
@@ -149,16 +154,18 @@ export async function refresh(
   if (row.expiresAt < new Date()) throw new HttpError(401, "Unauthorized");
 
   // claim it atomically: of two simultaneous requests only ONE can flip usedAt from null
-  const claimed = await prisma.refreshToken.updateMany({
-    where: { id: row.id, usedAt: null, revokedAt: null },
-    data: { usedAt: new Date() },
-  });
-  if (claimed.count !== 1) throw new HttpError(409, "Session refresh in progress");
+  const claimed = await db
+    .update(refreshTokens)
+    .set({ usedAt: new Date() })
+    .where(and(eq(refreshTokens.id, row.id), isNull(refreshTokens.usedAt), isNull(refreshTokens.revokedAt)))
+    .returning({ id: refreshTokens.id });
+  if (claimed.length !== 1) throw new HttpError(409, "Session refresh in progress");
 
-  const user = await prisma.user.findFirst({
-    where: { id: row.userId, status: "active", deletedAt: null },
-    select: { id: true, email: true, fullName: true, phone: true, avatarUrl: true },
-  });
+  const [user] = await db
+    .select(PUBLIC_USER_COLUMNS)
+    .from(users)
+    .where(and(eq(users.id, row.userId), eq(users.status, "active"), isNull(users.deletedAt)))
+    .limit(1);
   if (!user) throw new HttpError(401, "Unauthorized");
 
   // keep the school this session was in if the membership is still valid, otherwise fall back
@@ -179,9 +186,11 @@ export async function refresh(
 
 export async function logout(cookieToken: string | undefined): Promise<void> {
   if (!cookieToken) return; // nothing to revoke; logging out must never fail
-  const row = await prisma.refreshToken.findUnique({
-    where: { tokenHash: sha256(cookieToken) },
-  });
+  const [row] = await db
+    .select({ familyId: refreshTokens.familyId })
+    .from(refreshTokens)
+    .where(eq(refreshTokens.tokenHash, sha256(cookieToken)))
+    .limit(1);
   if (row) await revokeFamily(row.familyId, "logout");
 }
 
@@ -195,14 +204,20 @@ export async function switchOrganization(
   // The person's own active membership in the school with that slug. We query it directly (pickTenantId would
   // FALL BACK to another school). Same 403 whether the school does not exist or the person is not in it.
   const noAccess = () => new HttpError(403, "You do not have access to this organization");
-  const membership = await prisma.membership.findFirst({
-    where: {
-      userId,
-      status: "active",
-      tenant: { is: { slug: slug.toLowerCase(), status: "active", deletedAt: null } },
-    },
-    select: { tenantId: true },
-  });
+  const [membership] = await db
+    .select({ tenantId: memberships.tenantId })
+    .from(memberships)
+    .innerJoin(organizations, eq(memberships.tenantId, organizations.id))
+    .where(
+      and(
+        eq(memberships.userId, userId),
+        eq(memberships.status, "active"),
+        eq(organizations.slug, slug.toLowerCase()),
+        eq(organizations.status, "active"),
+        isNull(organizations.deletedAt),
+      ),
+    )
+    .limit(1);
   if (!membership) throw noAccess();
 
   const tenant = await loadTenantContext(userId, membership.tenantId);
@@ -211,20 +226,26 @@ export async function switchOrganization(
   // Take over the current login chain if the cookie belongs to this person and is still unused.
   let familyId: string | undefined;
   if (cookieToken) {
-    const row = await prisma.refreshToken.findUnique({ where: { tokenHash: sha256(cookieToken) } });
+    const [row] = await db
+      .select()
+      .from(refreshTokens)
+      .where(eq(refreshTokens.tokenHash, sha256(cookieToken)))
+      .limit(1);
     if (row && row.userId === userId && !row.usedAt && !row.revokedAt && row.expiresAt > new Date()) {
-      const claimed = await prisma.refreshToken.updateMany({
-        where: { id: row.id, usedAt: null, revokedAt: null },
-        data: { usedAt: new Date() },
-      });
-      if (claimed.count === 1) familyId = row.familyId;
+      const claimed = await db
+        .update(refreshTokens)
+        .set({ usedAt: new Date() })
+        .where(and(eq(refreshTokens.id, row.id), isNull(refreshTokens.usedAt), isNull(refreshTokens.revokedAt)))
+        .returning({ id: refreshTokens.id });
+      if (claimed.length === 1) familyId = row.familyId;
     }
   }
 
-  const user = await prisma.user.findFirst({
-    where: { id: userId, status: "active", deletedAt: null },
-    select: { id: true, email: true, fullName: true, phone: true, avatarUrl: true },
-  });
+  const [user] = await db
+    .select(PUBLIC_USER_COLUMNS)
+    .from(users)
+    .where(and(eq(users.id, userId), eq(users.status, "active"), isNull(users.deletedAt)))
+    .limit(1);
   if (!user) throw new HttpError(401, "Unauthorized");
 
   const session = await createSession({ userId, tenantId: tenant.id, meta, familyId });
@@ -233,8 +254,8 @@ export async function switchOrganization(
 
 // Revokes every refresh token of one login chain.
 export function revokeFamily(familyId: string, reason: string) {
-  return prisma.refreshToken.updateMany({
-    where: { familyId, revokedAt: null },
-    data: { revokedAt: new Date(), revokedReason: reason },
-  });
+  return db
+    .update(refreshTokens)
+    .set({ revokedAt: new Date(), revokedReason: reason })
+    .where(and(eq(refreshTokens.familyId, familyId), isNull(refreshTokens.revokedAt)));
 }

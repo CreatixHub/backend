@@ -2,8 +2,8 @@ name: Deploy backend
 
 # On every push to main: type-check + build, upload the build to the droplet over SSH, install production
 # dependencies, restart the service, wait for /api/health, and roll back to the previous release if it never
-# becomes healthy. Database migrations and the permission seed run inside the service start (systemd ExecStartPre),
-# so a failed migration also fails the health check and triggers the rollback.
+# becomes healthy. Database migrations (drizzle-kit migrate) and the permission seed run inside the service
+# start (systemd ExecStartPre), so a failed migration also fails the health check and triggers the rollback.
 #
 # One-time setup (already done for this repo): the droplet has the `karkaii` user, /etc/karkaii/api.env,
 # the karkaii-api systemd unit and the nginx /api/ route; the secrets DO_HOST / DO_USER / DO_SSH_KEY /
@@ -42,9 +42,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Generate the Prisma client
-        run: npx prisma generate
-
       - name: Type-check
         run: npm run typecheck
 
@@ -55,13 +52,13 @@ jobs:
         run: |
           test -f dist/server.js
           test -f dist/seed.js
-          test -f prisma/schema.prisma
-          test -d prisma/migrations
+          test -f drizzle.config.ts
+          test -d drizzle
 
       - name: Assemble the release folder
         run: |
           mkdir release
-          cp -r dist prisma package.json package-lock.json release/
+          cp -r dist drizzle drizzle.config.ts package.json package-lock.json release/
 
       - name: Set up SSH
         env:
@@ -102,7 +99,6 @@ jobs:
 
           cd "$APP"
           npm ci --omit=dev --no-audit --no-fund --silent
-          node node_modules/prisma/build/index.js generate >/dev/null
           # A failing migration or seed makes `restart` itself fail. Do not stop here: fall through to the
           # health check so the rollback below always runs.
           sudo systemctl restart "$SERVICE" || echo "systemctl restart reported a failure - checking health anyway" >&2

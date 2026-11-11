@@ -26,7 +26,7 @@ module.exports = tseslint.config(
   },
   {
     // CLI scripts, not request-handling code: plain stdout output is normal here, not a missed logger.call
-    files: ["src/seed.ts"],
+    files: ["src/seed.ts", "scripts/**/*.ts"],
     rules: { "no-console": "off" },
   },
   eslintConfigPrettier,
