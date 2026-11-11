@@ -3,10 +3,12 @@ import cors from "cors";
 import express from "express";
 import rateLimit from "express-rate-limit";
 import helmet from "helmet";
+import pinoHttp from "pino-http";
 import "./lib/bigint"; // makes BigInt ids JSON-serializable
 import { config } from "./config";
 import { prisma } from "./db";
 import { HttpError } from "./lib/errors";
+import { logger } from "./lib/logger";
 import { ok } from "./lib/respond";
 import { errorHandler } from "./middleware/errorHandler";
 import { publicAuthRouter } from "./modules/auth/auth.routes";
@@ -26,6 +28,13 @@ export function createApp() {
   app.disable("x-powered-by");
   app.use(helmet());
   app.use(cors({ origin: config.CORS_ORIGINS?.split(",") ?? false }));
+  app.use(
+    pinoHttp({
+      logger,
+      autoLogging: { ignore: (req) => req.url === "/api/health" }, // the health check runs every few seconds; don't flood the log
+      customProps: (req) => ({ tenantId: req.tenant?.id?.toString() }), // set once authenticate() runs; undefined on public routes
+    }),
+  );
   app.use(express.json({ limit: "100kb" }));
   app.use(cookieParser()); // makes req.cookies available
   app.use(
