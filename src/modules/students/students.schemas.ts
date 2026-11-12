@@ -20,6 +20,7 @@ const isoDate = z
 
 // ---------------------------------------------------------------- guardians
 const guardianFields = {
+  userId: id.nullish(),
   fullName: text(120),
   relation: z.enum(GUARDIAN_RELATIONS),
   phone: text(20),

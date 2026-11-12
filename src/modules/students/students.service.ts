@@ -12,6 +12,7 @@ import {
   users,
 } from '../../db/schema';
 import { HttpError } from '../../lib/errors';
+import { assertStudentReadable, resolveStudentScope, studentScopeCondition } from '../../lib/ownership';
 import { isForeignKeyViolation, isUniqueViolation } from '../../lib/pgErrors';
 import type { TenantContext } from '../../lib/tenant';
 import type { AuthUser } from '../../middleware/authenticate';
@@ -125,6 +126,29 @@ async function assertUserRelation(tenantId: bigint, userId: bigint, selfId?: big
   if (linked) throw new HttpError(409, 'That user is already linked to another student');
 }
 
+async function assertGuardianUserRelation(tenantId: bigint, userId: bigint, selfId?: bigint) {
+  const [member] = await db
+    .select({ id: memberships.id })
+    .from(memberships)
+    .where(and(eq(memberships.tenantId, tenantId), eq(memberships.userId, userId), eq(memberships.status, 'active')))
+    .limit(1);
+  if (!member) throw new HttpError(400, 'That user is not an active member of this school');
+
+  const [linked] = await db
+    .select({ id: guardians.id })
+    .from(guardians)
+    .where(
+      and(
+        eq(guardians.tenantId, tenantId),
+        eq(guardians.userId, userId),
+        isNull(guardians.deletedAt),
+        selfId === undefined ? undefined : ne(guardians.id, selfId),
+      ),
+    )
+    .limit(1);
+  if (linked) throw new HttpError(409, 'That user is already linked to another guardian');
+}
+
 async function assertAdmissionRelation(tenantId: bigint, admissionId: bigint, selfId?: bigint) {
   const [adm] = await db
     .select({ id: admissions.id, studentId: admissions.studentId })
@@ -140,7 +164,7 @@ async function assertAdmissionRelation(tenantId: bigint, admissionId: bigint, se
 async function nextAdmissionNo(tx: Tx, tenantId: bigint, year: string, offset: number): Promise<string> {
   const prefix = `STU-${year}-`;
   const [r] = await tx
-    .select({ max: sql<number | null>`max(substring(${students.admissionNo} from ${prefix.length + 1})::int)` })
+    .select({ max: sql<number | null>`max(substring(${students.admissionNo} from ${prefix.length + 1}::int)::int)` })
     .from(students)
     .where(and(eq(students.tenantId, tenantId), sql`${students.admissionNo} ~ ${'^STU-' + year + '-[0-9]+$'}`));
   return `${prefix}${String(Number(r?.max ?? 0) + 1 + offset).padStart(4, '0')}`;
@@ -251,10 +275,26 @@ export async function removeStudentHouse(tenant: TenantContext, actor: AuthUser,
 }
 
 // ================================================================ GUARDIANS
-export async function listGuardians(tenant: TenantContext, q: ListGuardiansInput) {
+export async function listGuardians(tenant: TenantContext, actor: AuthUser, q: ListGuardiansInput) {
+  const scope = await resolveStudentScope(tenant, actor.id, 'students.view');
+  let allowedGuardianIds: bigint[] | null = null;
+  if (scope.scoped) {
+    const idSet = new Set<bigint>(scope.guardianIds);
+    if (scope.studentIds.length > 0) {
+      const links = await db
+        .select({ guardianId: studentGuardians.guardianId })
+        .from(studentGuardians)
+        .where(and(eq(studentGuardians.tenantId, tenant.id), inArray(studentGuardians.studentId, scope.studentIds)));
+      for (const l of links) idSet.add(l.guardianId);
+    }
+    allowedGuardianIds = [...idSet];
+    if (allowedGuardianIds.length === 0) return { rows: [], meta: pageMeta(q.page, q.limit, 0) };
+  }
+
   const where = and(
     eq(guardians.tenantId, tenant.id),
     isNull(guardians.deletedAt),
+    allowedGuardianIds ? inArray(guardians.id, allowedGuardianIds) : undefined,
     q.relation ? eq(guardians.relation, q.relation) : undefined,
     q.isEmergencyContact !== undefined ? eq(guardians.isEmergencyContact, q.isEmergencyContact) : undefined,
     q.q
@@ -274,7 +314,8 @@ export async function listGuardians(tenant: TenantContext, q: ListGuardiansInput
   return { rows: rows.map(toRow), meta: pageMeta(q.page, q.limit, total) };
 }
 
-export async function getGuardian(tenant: TenantContext, id: bigint) {
+export async function getGuardian(tenant: TenantContext, actor: AuthUser, id: bigint) {
+  const scope = await resolveStudentScope(tenant, actor.id, 'students.view');
   const guardian = await loadGuardian(tenant.id, id);
   const linkedStudents = await db
     .select({
@@ -290,10 +331,19 @@ export async function getGuardian(tenant: TenantContext, id: bigint) {
     .where(and(eq(studentGuardians.tenantId, tenant.id), eq(studentGuardians.guardianId, id), isNull(students.deletedAt)))
     .orderBy(asc(students.fullName));
 
+  if (scope.scoped) {
+    const isSelfGuardian = scope.guardianIds.includes(id);
+    const sharesStudent = linkedStudents.some((s) => scope.studentIds.includes(s.studentId));
+    if (!isSelfGuardian && !sharesStudent) {
+      throw new HttpError(404, 'Guardian not found');
+    }
+  }
+
   return { ...toRow(guardian), students: linkedStudents };
 }
 
 export async function createGuardian(tenant: TenantContext, _actor: AuthUser, input: CreateGuardianInput) {
+  if (input.userId) await assertGuardianUserRelation(tenant.id, input.userId);
   try {
     const [row] = await db
       .insert(guardians)
@@ -315,6 +365,7 @@ export async function createGuardian(tenant: TenantContext, _actor: AuthUser, in
 
 export async function updateGuardian(tenant: TenantContext, _actor: AuthUser, id: bigint, input: UpdateGuardianInput) {
   await loadGuardian(tenant.id, id);
+  if (input.userId) await assertGuardianUserRelation(tenant.id, input.userId, id);
   try {
     const [row] = await db
       .update(guardians)
@@ -376,10 +427,15 @@ async function loadStudentDocumentsList(tenantId: bigint, studentId: bigint, run
     .orderBy(desc(studentDocuments.createdAt), desc(studentDocuments.id));
 }
 
-export async function listStudents(tenant: TenantContext, q: ListStudentsInput) {
+export async function listStudents(tenant: TenantContext, actor: AuthUser, q: ListStudentsInput) {
+  const scope = await resolveStudentScope(tenant, actor.id, 'students.view');
+  const scopeCond = studentScopeCondition(students.id, scope);
+  if (scopeCond === null) return { rows: [], meta: pageMeta(q.page, q.limit, 0) };
+
   const where = and(
     eq(students.tenantId, tenant.id),
     isNull(students.deletedAt),
+    scopeCond,
     q.status ? eq(students.status, q.status) : undefined,
     q.studentHouseId ? eq(students.studentHouseId, q.studentHouseId) : undefined,
     q.gender ? eq(students.gender, q.gender) : undefined,
@@ -414,7 +470,10 @@ export async function listStudents(tenant: TenantContext, q: ListStudentsInput) 
   return { rows: rows.map(toRow), meta: pageMeta(q.page, q.limit, total) };
 }
 
-export async function getStudent(tenant: TenantContext, id: bigint) {
+export async function getStudent(tenant: TenantContext, actor: AuthUser, id: bigint) {
+  const scope = await resolveStudentScope(tenant, actor.id, 'students.view');
+  assertStudentReadable(scope, id, 'Student not found');
+
   const [row] = await db
     .select({
       ...getTableColumns(students),
@@ -646,7 +705,9 @@ export async function removeStudent(tenant: TenantContext, actor: AuthUser, id: 
 }
 
 // ================================================================ STUDENT-GUARDIAN LINKS
-export async function listStudentGuardians(tenant: TenantContext, studentId: bigint) {
+export async function listStudentGuardians(tenant: TenantContext, actor: AuthUser, studentId: bigint) {
+  const scope = await resolveStudentScope(tenant, actor.id, 'students.view');
+  assertStudentReadable(scope, studentId, 'Student not found');
   await loadStudent(tenant.id, studentId);
   const rows = await loadStudentGuardiansList(tenant.id, studentId);
   return rows.map(toRow);
@@ -820,7 +881,9 @@ async function loadDocument(tenantId: bigint, studentId: bigint, docId: bigint) 
   return row;
 }
 
-export async function listStudentDocuments(tenant: TenantContext, studentId: bigint) {
+export async function listStudentDocuments(tenant: TenantContext, actor: AuthUser, studentId: bigint) {
+  const scope = await resolveStudentScope(tenant, actor.id, 'students.view');
+  assertStudentReadable(scope, studentId, 'Student not found');
   await loadStudent(tenant.id, studentId);
   const rows = await loadStudentDocumentsList(tenant.id, studentId);
   return rows.map(toRow);

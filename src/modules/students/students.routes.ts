@@ -26,12 +26,12 @@ import * as svc from './students.service';
 export const studentsRouter = Router();
 
 studentsRouter.get('/', requirePermission('students.view'), async (req, res) => {
-  const result = await svc.listStudents(currentTenant(req), listStudentsSchema.parse(req.query));
+  const result = await svc.listStudents(currentTenant(req), currentUser(req), listStudentsSchema.parse(req.query));
   ok(res, result.rows, result.meta);
 });
 
 studentsRouter.get('/:id', requirePermission('students.view'), async (req, res) => {
-  ok(res, await svc.getStudent(currentTenant(req), parseId(req.params.id)));
+  ok(res, await svc.getStudent(currentTenant(req), currentUser(req), parseId(req.params.id)));
 });
 
 studentsRouter.post('/', requirePermission('students.create'), async (req, res) => {
@@ -55,7 +55,7 @@ studentsRouter.delete('/:id', requirePermission('students.delete'), async (req, 
 
 // ---- /api/students/:id/guardians
 studentsRouter.get('/:id/guardians', requirePermission('students.view'), async (req, res) => {
-  ok(res, await svc.listStudentGuardians(currentTenant(req), parseId(req.params.id)));
+  ok(res, await svc.listStudentGuardians(currentTenant(req), currentUser(req), parseId(req.params.id)));
 });
 
 studentsRouter.post('/:id/guardians', requirePermission('students.edit'), async (req, res) => {
@@ -89,7 +89,7 @@ studentsRouter.delete('/:id/guardians/:guardianId', requirePermission('students.
 
 // ---- /api/students/:id/documents
 studentsRouter.get('/:id/documents', requirePermission('students.view'), async (req, res) => {
-  ok(res, await svc.listStudentDocuments(currentTenant(req), parseId(req.params.id)));
+  ok(res, await svc.listStudentDocuments(currentTenant(req), currentUser(req), parseId(req.params.id)));
 });
 
 studentsRouter.post('/:id/documents', requirePermission('students.edit'), async (req, res) => {
@@ -134,12 +134,12 @@ studentsRouter.delete('/:id/documents/:docId', requirePermission('students.edit'
 export const guardiansRouter = Router();
 
 guardiansRouter.get('/', requirePermission('students.view'), async (req, res) => {
-  const result = await svc.listGuardians(currentTenant(req), listGuardiansSchema.parse(req.query));
+  const result = await svc.listGuardians(currentTenant(req), currentUser(req), listGuardiansSchema.parse(req.query));
   ok(res, result.rows, result.meta);
 });
 
 guardiansRouter.get('/:id', requirePermission('students.view'), async (req, res) => {
-  ok(res, await svc.getGuardian(currentTenant(req), parseId(req.params.id)));
+  ok(res, await svc.getGuardian(currentTenant(req), currentUser(req), parseId(req.params.id)));
 });
 
 guardiansRouter.post('/', requirePermission('students.create'), async (req, res) => {

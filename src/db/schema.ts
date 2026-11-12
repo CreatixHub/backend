@@ -972,6 +972,7 @@ export const guardians = pgTable(
     tenantId: plainBigint("tenant_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    userId: plainBigint("user_id").references(() => users.id, { onDelete: "set null", onUpdate: "cascade" }),
     fullName: text("full_name").notNull(),
     relation: text("relation").notNull(), // father | mother | guardian | other
     phone: text("phone").notNull(),
@@ -992,7 +993,10 @@ export const guardians = pgTable(
     updatedAt: updatedAt(),
     deletedAt: ts("deleted_at"),
   },
-  (t) => [index("guardians_tenant_id_phone_idx").on(t.tenantId, t.phone)],
+  (t) => [
+    index("guardians_tenant_id_phone_idx").on(t.tenantId, t.phone),
+    index("guardians_tenant_id_user_id_idx").on(t.tenantId, t.userId),
+  ],
 );
 
 export const students = pgTable(
@@ -1197,6 +1201,535 @@ export const admissionStatusHistory = pgTable(
   (t) => [index("admission_status_history_tenant_id_admission_id_idx").on(t.tenantId, t.admissionId)],
 );
 
+// ─── Section 9: Attendance, Holidays, Leaves ───────────────────────────────────
+
+export const leaveTypes = pgTable(
+  "leave_types",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    code: text("code").notNull(),
+    name: text("name").notNull(),
+    isPaid: boolean("is_paid").notNull().default(true),
+    annualQuota: numeric("annual_quota", { precision: 5, scale: 1 }),
+    maxConsecutiveDays: smallint("max_consecutive_days"),
+    requiresDocument: boolean("requires_document").notNull().default(false),
+    carryForward: boolean("carry_forward"),
+    carryForwardLimit: numeric("carry_forward_limit", { precision: 5, scale: 1 }),
+    applicableTo: text("applicable_to").notNull(), // staff | student | both
+    leaveCategory: text("leave_category").notNull(),
+    accrualBasis: text("accrual_basis").notNull(), // annual | monthly | none
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [uniqueIndex("leave_types_tenant_id_code_key").on(t.tenantId, t.code)],
+);
+
+export const leaveRequests = pgTable(
+  "leave_requests",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    studentId: plainBigint("student_id").references(() => students.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    staffId: plainBigint("staff_id").references(() => staff.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    leaveTypeId: plainBigint("leave_type_id").references(() => leaveTypes.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    requestedByUserId: plainBigint("requested_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    fromDate: date("from_date").notNull(),
+    toDate: date("to_date").notNull(),
+    days: numeric("days", { precision: 5, scale: 1 }).notNull(),
+    durationType: text("duration_type").notNull(), // full_day | half_day
+    reason: text("reason").notNull(),
+    documentFileId: plainBigint("document_file_id"), // files table not built yet
+    status: text("status").notNull().default("pending"), // pending | approved | rejected | cancelled
+    decidedBy: plainBigint("decided_by").references(() => users.id, { onDelete: "set null", onUpdate: "cascade" }),
+    decidedAt: ts("decided_at"),
+    decisionNotes: text("decision_notes"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index("leave_requests_tenant_id_status_idx").on(t.tenantId, t.status),
+    index("leave_requests_tenant_id_student_id_idx").on(t.tenantId, t.studentId),
+    index("leave_requests_tenant_id_staff_id_idx").on(t.tenantId, t.staffId),
+  ],
+);
+
+export const leaveBalances = pgTable(
+  "leave_balances",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    staffId: plainBigint("staff_id")
+      .notNull()
+      .references(() => staff.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    leaveTypeId: plainBigint("leave_type_id")
+      .notNull()
+      .references(() => leaveTypes.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    academicYearId: plainBigint("academic_year_id").notNull(), // academic_years table not built yet
+    allocated: numeric("allocated", { precision: 5, scale: 1 }).notNull().default("0"),
+    used: numeric("used", { precision: 5, scale: 1 }).notNull().default("0"),
+    carriedForward: numeric("carried_forward", { precision: 5, scale: 1 }).notNull().default("0"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("leave_balances_tenant_staff_type_year_key").on(
+      t.tenantId,
+      t.staffId,
+      t.leaveTypeId,
+      t.academicYearId,
+    ),
+  ],
+);
+
+export const attendanceRules = pgTable(
+  "attendance_rules",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    audience: text("audience").notNull(), // student | staff
+    branchId: plainBigint("branch_id"), // branches table not built yet
+    name: text("name").notNull(),
+    lateAfter: time("late_after"),
+    halfDayAfter: time("half_day_after"),
+    absentAfter: time("absent_after"),
+    minAttendancePercent: numeric("min_attendance_percent", { precision: 5, scale: 2 }),
+    graceMinutes: smallint("grace_minutes").notNull().default(0),
+    workingWeekdays: smallint("working_weekdays").array().notNull(),
+    effectiveFrom: date("effective_from").notNull(),
+    effectiveTo: date("effective_to").notNull(),
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index("attendance_rules_tenant_id_audience_idx").on(t.tenantId, t.audience)],
+);
+
+export const academicCalendarEvents = pgTable(
+  "academic_calendar_events",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    academicYearId: plainBigint("academic_year_id"), // academic_years table not built yet
+    branchId: plainBigint("branch_id"), // branches table not built yet
+    title: text("title").notNull(),
+    description: text("description"),
+    eventType: text("event_type").notNull(), // holiday | exam | event | meeting | other
+    startsAt: ts("starts_at").notNull(),
+    endsAt: ts("ends_at").notNull(),
+    allDay: boolean("all_day").notNull().default(false),
+    audience: text("audience").notNull().default("all"), // all | students | staff | class
+    classId: plainBigint("class_id").references(() => classes.id, { onDelete: "set null", onUpdate: "cascade" }),
+    location: text("location"),
+    color: text("color"),
+    notifyVia: text("notify_via").array().notNull().default(sql`'{}'::text[]`),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index("academic_calendar_events_tenant_id_type_idx").on(t.tenantId, t.eventType),
+    index("academic_calendar_events_tenant_id_starts_at_idx").on(t.tenantId, t.startsAt),
+  ],
+);
+
+export const studentAttendance = pgTable(
+  "student_attendance",
+  {
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    enrollmentId: plainBigint("enrollment_id").notNull(), // enrollments table not built yet
+    attendanceDate: date("attendance_date").notNull(),
+    status: text("status").notNull(), // present | absent | late | half_day | excused
+    checkIn: time("check_in"),
+    checkOut: time("check_out"),
+    remarks: text("remarks"),
+    source: text("source").notNull().default("manual"), // manual | biometric | rfid | app
+    markedBy: plainBigint("marked_by").references(() => users.id, { onDelete: "set null", onUpdate: "cascade" }),
+    markedAt: ts("marked_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.enrollmentId, t.attendanceDate] }),
+    index("student_attendance_tenant_id_date_idx").on(t.tenantId, t.attendanceDate),
+  ],
+);
+
+export const staffAttendance = pgTable(
+  "staff_attendance",
+  {
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    staffId: plainBigint("staff_id")
+      .notNull()
+      .references(() => staff.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    attendanceDate: date("attendance_date").notNull(),
+    status: text("status").notNull(), // present | absent | late | half_day | on_leave
+    checkIn: ts("check_in"),
+    checkOut: ts("check_out"),
+    workedMinutes: integer("worked_minutes"),
+    leaveRequestId: plainBigint("leave_request_id").references(() => leaveRequests.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    shiftId: plainBigint("shift_id"), // work_shifts table not built yet
+    source: text("source").notNull().default("manual"),
+    markedBy: plainBigint("marked_by").references(() => users.id, { onDelete: "set null", onUpdate: "cascade" }),
+    markedAt: ts("marked_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.staffId, t.attendanceDate] }),
+    index("staff_attendance_tenant_id_date_idx").on(t.tenantId, t.attendanceDate),
+  ],
+);
+
+// ─── Section 10: Fees, Expenses ────────────────────────────────────────────────
+
+export const feeGroups = pgTable(
+  "fee_groups",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    name: text("name").notNull(),
+    code: text("code"),
+    category: text("category").notNull(),
+    displayOrder: smallint("display_order").notNull().default(0),
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [uniqueIndex("fee_groups_tenant_id_name_key").on(t.tenantId, t.name)],
+);
+
+export const feeTypes = pgTable(
+  "fee_types",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    feeGroupId: plainBigint("fee_group_id").references(() => feeGroups.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    code: text("code").notNull(),
+    name: text("name").notNull(),
+    category: text("category").notNull(),
+    frequency: text("frequency").notNull(), // one_time | monthly | quarterly | annual
+    isRefundable: boolean("is_refundable").notNull().default(false),
+    isMandatory: boolean("is_mandatory").notNull().default(true),
+    lateFeeApplicable: boolean("late_fee_applicable").notNull().default(false),
+    defaultAmount: numeric("default_amount", { precision: 12, scale: 2 }),
+    status: text("status").notNull().default("active"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [uniqueIndex("fee_types_tenant_id_code_key").on(t.tenantId, t.code)],
+);
+
+export const feeStructures = pgTable(
+  "fee_structures",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    academicYearId: plainBigint("academic_year_id").notNull(), // academic_years table not built yet
+    classId: plainBigint("class_id")
+      .notNull()
+      .references(() => classes.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    name: text("name"),
+    code: text("code"),
+    description: text("description"),
+    frequency: text("frequency").notNull(),
+    effectiveFrom: date("effective_from"),
+    status: text("status").notNull().default("active"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index("fee_structures_tenant_id_class_id_idx").on(t.tenantId, t.classId),
+    index("fee_structures_tenant_id_academic_year_id_idx").on(t.tenantId, t.academicYearId),
+  ],
+);
+
+export const feeStructureItems = pgTable(
+  "fee_structure_items",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    feeStructureId: plainBigint("fee_structure_id")
+      .notNull()
+      .references(() => feeStructures.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    feeTypeId: plainBigint("fee_type_id")
+      .notNull()
+      .references(() => feeTypes.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    amount: numeric("amount", { precision: 12, scale: 2 }).notNull(),
+    isOptional: boolean("is_optional").notNull().default(false),
+    dueOn: date("due_on"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index("fee_structure_items_tenant_id_structure_id_idx").on(t.tenantId, t.feeStructureId)],
+);
+
+export const feeInstallments = pgTable(
+  "fee_installments",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    feeStructureId: plainBigint("fee_structure_id")
+      .notNull()
+      .references(() => feeStructures.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    name: text("name").notNull(),
+    sequence: smallint("sequence").notNull(),
+    dueOn: date("due_on").notNull(),
+    percentOfTotal: numeric("percent_of_total", { precision: 5, scale: 2 }).notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index("fee_installments_tenant_id_structure_id_idx").on(t.tenantId, t.feeStructureId)],
+);
+
+export const feeAssignments = pgTable(
+  "fee_assignments",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    enrollmentId: plainBigint("enrollment_id").notNull(), // enrollments table not built yet
+    feeStructureId: plainBigint("fee_structure_id")
+      .notNull()
+      .references(() => feeStructures.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    assignedOn: date("assigned_on").notNull(),
+    discountPercent: numeric("discount_percent", { precision: 5, scale: 2 }).notNull().default("0"),
+    status: text("status").notNull().default("active"), // active | cancelled
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index("fee_assignments_tenant_id_enrollment_id_idx").on(t.tenantId, t.enrollmentId),
+    index("fee_assignments_tenant_id_structure_id_idx").on(t.tenantId, t.feeStructureId),
+  ],
+);
+
+export const invoices = pgTable(
+  "invoices",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    number: text("number").notNull(),
+    studentId: plainBigint("student_id")
+      .notNull()
+      .references(() => students.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    enrollmentId: plainBigint("enrollment_id"), // enrollments table not built yet
+    academicYearId: plainBigint("academic_year_id").notNull(), // academic_years table not built yet
+    installmentId: plainBigint("installment_id").references(() => feeInstallments.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    issuedOn: date("issued_on").notNull(),
+    dueOn: date("due_on").notNull(),
+    status: text("status").notNull().default("draft"), // draft | issued | partially_paid | paid | overdue | void
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("invoices_tenant_id_number_key").on(t.tenantId, t.number),
+    index("invoices_tenant_id_student_id_idx").on(t.tenantId, t.studentId),
+    index("invoices_tenant_id_status_idx").on(t.tenantId, t.status),
+  ],
+);
+
+export const invoiceLines = pgTable(
+  "invoice_lines",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    invoiceId: plainBigint("invoice_id")
+      .notNull()
+      .references(() => invoices.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    lineType: text("line_type").notNull(), // fee | discount | fine | tax
+    feeTypeId: plainBigint("fee_type_id").references(() => feeTypes.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    quantity: numeric("quantity", { precision: 10, scale: 2 }).notNull().default("1"),
+    unitAmount: numeric("unit_amount", { precision: 12, scale: 2 }).notNull(),
+    discountAmount: numeric("discount_amount", { precision: 12, scale: 2 }).notNull().default("0"),
+    taxAmount: numeric("tax_amount", { precision: 12, scale: 2 }).notNull().default("0"),
+    lineTotal: numeric("line_total", { precision: 12, scale: 2 }).notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index("invoice_lines_tenant_id_invoice_id_idx").on(t.tenantId, t.invoiceId)],
+);
+
+export const payments = pgTable(
+  "payments",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    receiptNo: text("receipt_no").notNull(),
+    studentId: plainBigint("student_id")
+      .notNull()
+      .references(() => students.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    amount: numeric("amount", { precision: 12, scale: 2 }).notNull(),
+    method: text("method").notNull(), // cash | card | bank_transfer | cheque | online | upi
+    receivedAt: ts("received_at").notNull(),
+    receivedBy: plainBigint("received_by").references(() => users.id, { onDelete: "set null", onUpdate: "cascade" }),
+    status: text("status").notNull().default("cleared"), // cleared | pending | bounced | reversed
+    idempotencyKey: text("idempotency_key"),
+    chequeNo: text("cheque_no"),
+    chequeDate: date("cheque_date"),
+    chequeStatus: text("cheque_status"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("payments_tenant_id_receipt_no_key").on(t.tenantId, t.receiptNo),
+    uniqueIndex("payments_tenant_id_idempotency_key_key").on(t.tenantId, t.idempotencyKey),
+    index("payments_tenant_id_student_id_idx").on(t.tenantId, t.studentId),
+  ],
+);
+
+export const expenseCategories = pgTable(
+  "expense_categories",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    name: text("name").notNull(),
+    parentId: plainBigint("parent_id").references((): AnyPgColumn => expenseCategories.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    annualBudget: numeric("annual_budget", { precision: 12, scale: 2 }),
+    perExpenseLimit: numeric("per_expense_limit", { precision: 12, scale: 2 }),
+    approvalLevel: text("approval_level").notNull().default("manager"), // none | manager | admin | owner
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [uniqueIndex("expense_categories_tenant_id_name_key").on(t.tenantId, t.name)],
+);
+
+export const expenses = pgTable(
+  "expenses",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    expenseNo: text("expense_no").notNull(),
+    categoryId: plainBigint("category_id")
+      .notNull()
+      .references(() => expenseCategories.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    vendorId: plainBigint("vendor_id"), // vendors table not built yet
+    branchId: plainBigint("branch_id"), // branches table not built yet
+    staffId: plainBigint("staff_id").references(() => staff.id, { onDelete: "set null", onUpdate: "cascade" }),
+    priority: text("priority").notNull().default("normal"), // low | normal | high | urgent
+    amount: numeric("amount", { precision: 12, scale: 2 }).notNull(),
+    taxAmount: numeric("tax_amount", { precision: 12, scale: 2 }).notNull().default("0"),
+    expenseDate: date("expense_date").notNull(),
+    description: text("description").notNull(),
+    paymentMethod: text("payment_method"),
+    receiptFileId: plainBigint("receipt_file_id"), // files table not built yet
+    status: text("status").notNull().default("submitted"), // submitted | approved | rejected | paid
+    approvedBy: plainBigint("approved_by").references(() => users.id, { onDelete: "set null", onUpdate: "cascade" }),
+    approvedAt: ts("approved_at"),
+    paidAt: ts("paid_at"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("expenses_tenant_id_expense_no_key").on(t.tenantId, t.expenseNo),
+    index("expenses_tenant_id_status_idx").on(t.tenantId, t.status),
+    index("expenses_tenant_id_category_id_idx").on(t.tenantId, t.categoryId),
+  ],
+);
+
+// ─── Section 13: Gate Pass (exit_passes) ───────────────────────────────────────
+
+export const exitPasses = pgTable(
+  "exit_passes",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    studentId: plainBigint("student_id").references(() => students.id, { onDelete: "set null", onUpdate: "cascade" }),
+    requestedByGuardianId: plainBigint("requested_by_guardian_id").references(() => guardians.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    requestedByStaffId: plainBigint("requested_by_staff_id").references(() => staff.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    reason: text("reason").notNull(),
+    reasonType: text("reason_type").notNull(),
+    requestedExitAt: ts("requested_exit_at").notNull(),
+    expectedReturnAt: ts("expected_return_at").notNull(),
+    status: text("status").notNull().default("pending"), // pending | approved | rejected | used | expired | revoked
+    approvedBy: plainBigint("approved_by").references(() => users.id, { onDelete: "set null", onUpdate: "cascade" }),
+    approvedAt: ts("approved_at"),
+    rejectionReason: text("rejection_reason"),
+    pickedUpByGuardianId: plainBigint("picked_up_by_guardian_id").references(() => guardians.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    authorizedPersonName: text("authorized_person_name"),
+    authorizedPersonRelation: text("authorized_person_relation"),
+    actualExitAt: ts("actual_exit_at"),
+    actualReturnAt: ts("actual_return_at"),
+    passCode: text("pass_code").notNull(),
+    usedAt: ts("used_at"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("exit_passes_tenant_id_pass_code_key").on(t.tenantId, t.passCode),
+    index("exit_passes_tenant_id_student_id_idx").on(t.tenantId, t.studentId),
+    index("exit_passes_tenant_id_status_idx").on(t.tenantId, t.status),
+  ],
+);
+
 export const assetCategoriesRelations = relations(assetCategories, ({ one, many }) => ({
   parent: one(assetCategories, {
     fields: [assetCategories.parentId],
@@ -1362,6 +1895,7 @@ export const studentHousesRelations = relations(studentHouses, ({ one, many }) =
 
 export const guardiansRelations = relations(guardians, ({ one, many }) => ({
   tenant: one(organizations, { fields: [guardians.tenantId], references: [organizations.id] }),
+  user: one(users, { fields: [guardians.userId], references: [users.id] }),
   studentGuardians: many(studentGuardians),
 }));
 
@@ -1401,3 +1935,147 @@ export const admissionStatusHistoryRelations = relations(admissionStatusHistory,
   admission: one(admissions, { fields: [admissionStatusHistory.admissionId], references: [admissions.id] }),
   changedByUser: one(users, { fields: [admissionStatusHistory.changedBy], references: [users.id] }),
 }));
+
+export const leaveTypesRelations = relations(leaveTypes, ({ one, many }) => ({
+  tenant: one(organizations, { fields: [leaveTypes.tenantId], references: [organizations.id] }),
+  requests: many(leaveRequests),
+  balances: many(leaveBalances),
+}));
+
+export const leaveRequestsRelations = relations(leaveRequests, ({ one, many }) => ({
+  tenant: one(organizations, { fields: [leaveRequests.tenantId], references: [organizations.id] }),
+  student: one(students, { fields: [leaveRequests.studentId], references: [students.id] }),
+  staff: one(staff, { fields: [leaveRequests.staffId], references: [staff.id] }),
+  leaveType: one(leaveTypes, { fields: [leaveRequests.leaveTypeId], references: [leaveTypes.id] }),
+  requestedByUser: one(users, {
+    fields: [leaveRequests.requestedByUserId],
+    references: [users.id],
+    relationName: "leaveRequestedBy",
+  }),
+  decidedByUser: one(users, {
+    fields: [leaveRequests.decidedBy],
+    references: [users.id],
+    relationName: "leaveDecidedBy",
+  }),
+  staffAttendance: many(staffAttendance),
+}));
+
+export const leaveBalancesRelations = relations(leaveBalances, ({ one }) => ({
+  tenant: one(organizations, { fields: [leaveBalances.tenantId], references: [organizations.id] }),
+  staff: one(staff, { fields: [leaveBalances.staffId], references: [staff.id] }),
+  leaveType: one(leaveTypes, { fields: [leaveBalances.leaveTypeId], references: [leaveTypes.id] }),
+}));
+
+export const attendanceRulesRelations = relations(attendanceRules, ({ one }) => ({
+  tenant: one(organizations, { fields: [attendanceRules.tenantId], references: [organizations.id] }),
+}));
+
+export const academicCalendarEventsRelations = relations(academicCalendarEvents, ({ one }) => ({
+  tenant: one(organizations, { fields: [academicCalendarEvents.tenantId], references: [organizations.id] }),
+  class: one(classes, { fields: [academicCalendarEvents.classId], references: [classes.id] }),
+}));
+
+export const studentAttendanceRelations = relations(studentAttendance, ({ one }) => ({
+  tenant: one(organizations, { fields: [studentAttendance.tenantId], references: [organizations.id] }),
+  markedByUser: one(users, { fields: [studentAttendance.markedBy], references: [users.id] }),
+}));
+
+export const staffAttendanceRelations = relations(staffAttendance, ({ one }) => ({
+  tenant: one(organizations, { fields: [staffAttendance.tenantId], references: [organizations.id] }),
+  staff: one(staff, { fields: [staffAttendance.staffId], references: [staff.id] }),
+  leaveRequest: one(leaveRequests, { fields: [staffAttendance.leaveRequestId], references: [leaveRequests.id] }),
+  markedByUser: one(users, { fields: [staffAttendance.markedBy], references: [users.id] }),
+}));
+
+export const feeGroupsRelations = relations(feeGroups, ({ one, many }) => ({
+  tenant: one(organizations, { fields: [feeGroups.tenantId], references: [organizations.id] }),
+  feeTypes: many(feeTypes),
+}));
+
+export const feeTypesRelations = relations(feeTypes, ({ one, many }) => ({
+  tenant: one(organizations, { fields: [feeTypes.tenantId], references: [organizations.id] }),
+  feeGroup: one(feeGroups, { fields: [feeTypes.feeGroupId], references: [feeGroups.id] }),
+  structureItems: many(feeStructureItems),
+  invoiceLines: many(invoiceLines),
+}));
+
+export const feeStructuresRelations = relations(feeStructures, ({ one, many }) => ({
+  tenant: one(organizations, { fields: [feeStructures.tenantId], references: [organizations.id] }),
+  class: one(classes, { fields: [feeStructures.classId], references: [classes.id] }),
+  items: many(feeStructureItems),
+  installments: many(feeInstallments),
+  assignments: many(feeAssignments),
+}));
+
+export const feeStructureItemsRelations = relations(feeStructureItems, ({ one }) => ({
+  tenant: one(organizations, { fields: [feeStructureItems.tenantId], references: [organizations.id] }),
+  feeStructure: one(feeStructures, { fields: [feeStructureItems.feeStructureId], references: [feeStructures.id] }),
+  feeType: one(feeTypes, { fields: [feeStructureItems.feeTypeId], references: [feeTypes.id] }),
+}));
+
+export const feeInstallmentsRelations = relations(feeInstallments, ({ one, many }) => ({
+  tenant: one(organizations, { fields: [feeInstallments.tenantId], references: [organizations.id] }),
+  feeStructure: one(feeStructures, { fields: [feeInstallments.feeStructureId], references: [feeStructures.id] }),
+  invoices: many(invoices),
+}));
+
+export const feeAssignmentsRelations = relations(feeAssignments, ({ one }) => ({
+  tenant: one(organizations, { fields: [feeAssignments.tenantId], references: [organizations.id] }),
+  feeStructure: one(feeStructures, { fields: [feeAssignments.feeStructureId], references: [feeStructures.id] }),
+}));
+
+export const invoicesRelations = relations(invoices, ({ one, many }) => ({
+  tenant: one(organizations, { fields: [invoices.tenantId], references: [organizations.id] }),
+  student: one(students, { fields: [invoices.studentId], references: [students.id] }),
+  installment: one(feeInstallments, { fields: [invoices.installmentId], references: [feeInstallments.id] }),
+  lines: many(invoiceLines),
+}));
+
+export const invoiceLinesRelations = relations(invoiceLines, ({ one }) => ({
+  tenant: one(organizations, { fields: [invoiceLines.tenantId], references: [organizations.id] }),
+  invoice: one(invoices, { fields: [invoiceLines.invoiceId], references: [invoices.id] }),
+  feeType: one(feeTypes, { fields: [invoiceLines.feeTypeId], references: [feeTypes.id] }),
+}));
+
+export const paymentsRelations = relations(payments, ({ one }) => ({
+  tenant: one(organizations, { fields: [payments.tenantId], references: [organizations.id] }),
+  student: one(students, { fields: [payments.studentId], references: [students.id] }),
+  receivedByUser: one(users, { fields: [payments.receivedBy], references: [users.id] }),
+}));
+
+export const expenseCategoriesRelations = relations(expenseCategories, ({ one, many }) => ({
+  tenant: one(organizations, { fields: [expenseCategories.tenantId], references: [organizations.id] }),
+  parent: one(expenseCategories, {
+    fields: [expenseCategories.parentId],
+    references: [expenseCategories.id],
+    relationName: "expenseCategoryParent",
+  }),
+  children: many(expenseCategories, { relationName: "expenseCategoryParent" }),
+  expenses: many(expenses),
+}));
+
+export const expensesRelations = relations(expenses, ({ one }) => ({
+  tenant: one(organizations, { fields: [expenses.tenantId], references: [organizations.id] }),
+  category: one(expenseCategories, { fields: [expenses.categoryId], references: [expenseCategories.id] }),
+  staff: one(staff, { fields: [expenses.staffId], references: [staff.id] }),
+  approvedByUser: one(users, { fields: [expenses.approvedBy], references: [users.id] }),
+}));
+
+export const exitPassesRelations = relations(exitPasses, ({ one }) => ({
+  tenant: one(organizations, { fields: [exitPasses.tenantId], references: [organizations.id] }),
+  student: one(students, { fields: [exitPasses.studentId], references: [students.id] }),
+  requestedByGuardian: one(guardians, {
+    fields: [exitPasses.requestedByGuardianId],
+    references: [guardians.id],
+    relationName: "exitPassRequestedByGuardian",
+  }),
+  pickedUpByGuardian: one(guardians, {
+    fields: [exitPasses.pickedUpByGuardianId],
+    references: [guardians.id],
+    relationName: "exitPassPickedUpByGuardian",
+  }),
+  requestedByStaff: one(staff, { fields: [exitPasses.requestedByStaffId], references: [staff.id] }),
+  approvedByUser: one(users, { fields: [exitPasses.approvedBy], references: [users.id] }),
+}));
+
+

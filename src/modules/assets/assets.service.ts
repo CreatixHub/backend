@@ -2,6 +2,7 @@ import { and, asc, count, desc, eq, getTableColumns, ilike, isNotNull, isNull, l
 import { db } from '../../db';
 import { assetAllocations, assetCategories, assetMaintenance, assets, classrooms, staff } from '../../db/schema';
 import { HttpError } from '../../lib/errors';
+import { resolveStudentScope, studentScopeCondition } from '../../lib/ownership';
 import type { TenantContext } from '../../lib/tenant';
 import type { AuthUser } from '../../middleware/authenticate';
 import type {
@@ -436,9 +437,14 @@ export async function disposeAsset(tenant: TenantContext, id: bigint, input: Dis
 // ================================================================ ALLOCATIONS
 const ALREADY_ALLOCATED = 'This asset is already allocated: return it first';
 
-export async function listAllocations(tenant: TenantContext, q: ListAllocationsInput): Promise<Page> {
+export async function listAllocations(tenant: TenantContext, actor: AuthUser, q: ListAllocationsInput): Promise<Page> {
+  const scope = await resolveStudentScope(tenant, actor.id, 'assets.view');
+  const scopeCond = studentScopeCondition(assetAllocations.studentId, scope);
+  if (scopeCond === null) return { rows: [], meta: pageMeta(q.page, q.limit, 0) };
+
   const where = and(
     eq(assetAllocations.tenantId, tenant.id),
+    scopeCond,
     q.assetId ? eq(assetAllocations.assetId, q.assetId) : undefined,
     q.staffId ? eq(assetAllocations.staffId, q.staffId) : undefined,
     q.studentId ? eq(assetAllocations.studentId, q.studentId) : undefined,

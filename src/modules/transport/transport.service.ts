@@ -10,6 +10,7 @@ import {
   vehicles,
 } from '../../db/schema';
 import { HttpError } from '../../lib/errors';
+import { resolveStudentScope, studentScopeCondition } from '../../lib/ownership';
 import type { TenantContext } from '../../lib/tenant';
 import type { AuthUser } from '../../middleware/authenticate';
 import type {
@@ -704,9 +705,14 @@ async function assertNoDuplicate(
   }
 }
 
-export async function listAssignments(tenant: TenantContext, q: ListAssignmentsInput): Promise<Page> {
+export async function listAssignments(tenant: TenantContext, actor: AuthUser, q: ListAssignmentsInput): Promise<Page> {
+  const scope = await resolveStudentScope(tenant, actor.id, 'transport.view');
+  const scopeCond = studentScopeCondition(transportAssignments.studentId, scope);
+  if (scopeCond === null) return { rows: [], meta: pageMeta(q.page, q.limit, 0) };
+
   const where = and(
     eq(transportAssignments.tenantId, tenant.id),
+    scopeCond,
     q.routeId ? eq(transportAssignments.routeId, q.routeId) : undefined,
     q.pickupPointId ? eq(transportAssignments.pickupPointId, q.pickupPointId) : undefined,
     q.studentId ? eq(transportAssignments.studentId, q.studentId) : undefined,

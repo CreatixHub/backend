@@ -34,17 +34,43 @@ import {
   updateAdmissionSchema,
 } from '../modules/admissions/admissions.schemas';
 import {
+  bulkMarkStaffAttendanceSchema, bulkMarkStudentAttendanceSchema, createAttendanceRuleSchema,
+  createCalendarEventSchema, createLeaveRequestSchema, createLeaveTypeSchema, decideLeaveRequestSchema,
+  listAttendanceRulesSchema, listCalendarEventsSchema, listLeaveBalancesSchema, listLeaveRequestsSchema,
+  listLeaveTypesSchema, listStaffAttendanceSchema, listStudentAttendanceSchema, updateAttendanceRuleSchema,
+  updateCalendarEventSchema, updateLeaveBalanceSchema, updateLeaveRequestSchema, updateLeaveTypeSchema,
+  upsertLeaveBalanceSchema, upsertStaffAttendanceSchema, upsertStudentAttendanceSchema,
+} from '../modules/attendance/attendance.schemas';
+import {
   createGuardianSchema, createStudentDocumentSchema, createStudentHouseSchema, createStudentSchema,
   linkStudentGuardianSchema, listGuardiansSchema, listStudentHousesSchema, listStudentsSchema,
   updateGuardianSchema, updateStudentDocumentSchema, updateStudentGuardianSchema, updateStudentHouseSchema,
   updateStudentSchema, updateStudentStatusSchema, verifyStudentDocumentSchema,
 } from '../modules/students/students.schemas';
 import {
-  Admission, AdmissionStatusHistoryItem, Asset, AssetAllocation, AssetCategory, AssetMaintenance, ClassRow, ClassSubject, CreatedOrganization,
-  CurrentOrganization, Driver, ErrorResponse, Guardian, Health, Homework, HomeworkSubmission, Me, Member, Permission,
-  PickupPoint, Role, RouteSchedule, SchoolSummary, Section, SectionTeacher, SessionData, Staff, Student, StudentDocument,
-  StudentGuardian, StudentHouse, Subject, TimeSlot, TimetableEntry, TransportAssignment, TransportRoute, Vehicle,
-  envelope, pagedEnvelope,
+  createFeeAssignmentSchema, createFeeGroupSchema, createFeeStructureSchema, createFeeTypeSchema,
+  createInvoiceSchema, createPaymentSchema, feeInstallmentInputSchema, feeStructureItemInputSchema,
+  generateInvoiceFromStructureSchema, invoiceLineInputSchema, listFeeAssignmentsSchema, listFeeGroupsSchema,
+  listFeeStructuresSchema, listFeeTypesSchema, listInvoicesSchema, listPaymentsSchema, updateFeeAssignmentSchema,
+  updateFeeGroupSchema, updateFeeInstallmentSchema, updateFeeStructureItemSchema, updateFeeStructureSchema,
+  updateFeeTypeSchema, updateInvoiceSchema, updatePaymentSchema,
+} from '../modules/finance/finance.schemas';
+import {
+  createExpenseCategorySchema, createExpenseSchema, decideExpenseSchema, listExpenseCategoriesSchema,
+  listExpensesSchema, markExpensePaidSchema, updateExpenseCategorySchema, updateExpenseSchema,
+} from '../modules/expenses/expenses.schemas';
+import {
+  createExitPassSchema, decideExitPassSchema, listExitPassesSchema, returnExitPassSchema, updateExitPassSchema,
+  useExitPassSchema, verifyExitPassSchema,
+} from '../modules/gatepass/gatepass.schemas';
+import {
+  Admission, AdmissionStatusHistoryItem, Asset, AssetAllocation, AssetCategory, AssetMaintenance, AttendanceRule,
+  CalendarEvent, ClassRow, ClassSubject, CreatedOrganization, CurrentOrganization, Driver, ErrorResponse, ExitPass,
+  Expense, ExpenseCategory, FeeAssignment, FeeGroup, FeeInstallment, FeeStructure, FeeStructureItem, FeeType,
+  Guardian, Health, Homework, HomeworkSubmission, Invoice, InvoiceLine, LeaveBalance, LeaveRequest, LeaveType, Me,
+  Member, Payment, Permission, PickupPoint, Role, RouteSchedule, SchoolSummary, Section, SectionTeacher, SessionData,
+  Staff, StaffAttendance, Student, StudentAttendance, StudentDocument, StudentGuardian, StudentHouse, Subject,
+  TimeSlot, TimetableEntry, TransportAssignment, TransportRoute, Vehicle, envelope, pagedEnvelope,
 } from './schemas';
 
 // One place that describes every endpoint. When you add or change a route, update its entry here.
@@ -786,6 +812,358 @@ crud({
   withDelete: true,
 });
 
+// ------------------------------------------------------------------ Attendance, Holidays, Leaves
+registry.registerPath({
+  method: 'get', path: '/student-attendance', tags: ['Attendance'],
+  summary: 'List student attendance records',
+  description: 'Paged list of daily student attendance records.' + needs('attendance.view'),
+  security: bearer,
+  request: { query: listStudentAttendanceSchema },
+  responses: { 200: reply('Paged student attendance list', pagedEnvelope('StudentAttendancePage', StudentAttendance)), 401: E.unauthorized, 403: E.noPermission },
+});
+registry.registerPath({
+  method: 'put', path: '/student-attendance', tags: ['Attendance'],
+  summary: 'Mark or update student attendance',
+  description: 'Idempotent upsert keyed by `(enrollmentId, attendanceDate)`.' + needs('attendance.create'),
+  security: bearer,
+  request: { body: json(upsertStudentAttendanceSchema) },
+  responses: { 200: reply('Marked', envelope('StudentAttendanceReply', StudentAttendance)), 400: E.validation, 401: E.unauthorized, 403: E.noPermission },
+});
+registry.registerPath({
+  method: 'post', path: '/student-attendance/bulk', tags: ['Attendance'],
+  summary: 'Bulk mark student attendance',
+  description: 'Marks attendance for up to 200 enrollments for a single date.' + needs('attendance.create'),
+  security: bearer,
+  request: { body: json(bulkMarkStudentAttendanceSchema) },
+  responses: { 200: reply('Marked list', envelope('StudentAttendanceBulkReply', z.array(StudentAttendance))), 400: E.validation, 401: E.unauthorized, 403: E.noPermission },
+});
+registry.registerPath({
+  method: 'get', path: '/staff-attendance', tags: ['Attendance'],
+  summary: 'List staff attendance records',
+  description: 'Paged list of daily staff attendance records.' + needs('attendance.view'),
+  security: bearer,
+  request: { query: listStaffAttendanceSchema },
+  responses: { 200: reply('Paged staff attendance list', pagedEnvelope('StaffAttendancePage', StaffAttendance)), 401: E.unauthorized, 403: E.noPermission },
+});
+registry.registerPath({
+  method: 'put', path: '/staff-attendance', tags: ['Attendance'],
+  summary: 'Mark or update staff attendance',
+  description: 'Idempotent upsert keyed by `(staffId, attendanceDate)`.' + needs('attendance.create'),
+  security: bearer,
+  request: { body: json(upsertStaffAttendanceSchema) },
+  responses: { 200: reply('Marked', envelope('StaffAttendanceReply', StaffAttendance)), 400: E.validation, 401: E.unauthorized, 403: E.noPermission },
+});
+registry.registerPath({
+  method: 'post', path: '/staff-attendance/bulk', tags: ['Attendance'],
+  summary: 'Bulk mark staff attendance',
+  description: 'Marks attendance for up to 200 staff members for a single date.' + needs('attendance.create'),
+  security: bearer,
+  request: { body: json(bulkMarkStaffAttendanceSchema) },
+  responses: { 200: reply('Marked list', envelope('StaffAttendanceBulkReply', z.array(StaffAttendance))), 400: E.validation, 401: E.unauthorized, 403: E.noPermission },
+});
+
+crud({
+  tag: 'Attendance', base: '/attendance-rules', module: 'attendance', resourceName: 'attendance rule', idDesc: 'The rule id from GET /attendance-rules',
+  item: AttendanceRule, listQuery: listAttendanceRulesSchema, paged: true,
+  withGetOne: true,
+  createBody: createAttendanceRuleSchema,
+  updateBody: updateAttendanceRuleSchema,
+  withDelete: true,
+});
+
+crud({
+  tag: 'Calendar', base: '/calendar-events', module: 'calendar', resourceName: 'calendar event', idDesc: 'The event id from GET /calendar-events',
+  listDescription: 'Filter by `eventType=holiday` to list school holidays.',
+  item: CalendarEvent, listQuery: listCalendarEventsSchema, paged: true,
+  withGetOne: true,
+  createBody: createCalendarEventSchema,
+  updateBody: updateCalendarEventSchema,
+  withDelete: true,
+});
+
+crud({
+  tag: 'Leaves', base: '/leave-types', module: 'leaves', resourceName: 'leave type', idDesc: 'The leave type id from GET /leave-types',
+  item: LeaveType, listQuery: listLeaveTypesSchema, paged: true,
+  withGetOne: true,
+  createBody: createLeaveTypeSchema,
+  conflict: { description: 'Leave type code already exists in this school.', message: 'A leave type with this code already exists' },
+  updateBody: updateLeaveTypeSchema,
+  withDelete: true,
+});
+
+crud({
+  tag: 'Leaves', base: '/leave-requests', module: 'leaves', resourceName: 'leave request', idDesc: 'The leave request id from GET /leave-requests',
+  item: LeaveRequest, listQuery: listLeaveRequestsSchema, paged: true,
+  withGetOne: true,
+  createBody: createLeaveRequestSchema,
+  updateBody: updateLeaveRequestSchema,
+});
+registry.registerPath({
+  method: 'post', path: '/leave-requests/{id}/decide', tags: ['Leaves'],
+  summary: 'Approve or reject a leave request',
+  description: 'Transitions a `pending` leave request to `approved` or `rejected`, deducting staff leave balance if configured.' + needs('leaves.approve'),
+  security: bearer,
+  request: { params: idParam('The leave request id'), body: json(decideLeaveRequestSchema) },
+  responses: { 200: reply('Updated leave request', envelope('LeaveRequestReply', LeaveRequest)), 401: E.unauthorized, 403: E.noPermission, 404: fail('Not found', 'Leave request not found'), 409: fail('Conflict', 'Leave request is already decided') },
+});
+registry.registerPath({
+  method: 'post', path: '/leave-requests/{id}/cancel', tags: ['Leaves'],
+  summary: 'Cancel a leave request',
+  description: 'Cancels a pending or approved leave request and restores deducted staff leave balance.' + needs('leaves.edit'),
+  security: bearer,
+  request: { params: idParam('The leave request id') },
+  responses: { 200: reply('Cancelled leave request', envelope('LeaveRequestCancelReply', LeaveRequest)), 401: E.unauthorized, 403: E.noPermission, 404: fail('Not found', 'Leave request not found'), 409: fail('Conflict', 'Cannot cancel this leave request') },
+});
+registry.registerPath({
+  method: 'get', path: '/leave-balances', tags: ['Leaves'],
+  summary: 'List staff leave balances',
+  description: 'Paged list of annual staff leave balances.' + needs('leaves.view'),
+  security: bearer,
+  request: { query: listLeaveBalancesSchema },
+  responses: { 200: reply('Paged leave balances', pagedEnvelope('LeaveBalancePage', LeaveBalance)), 401: E.unauthorized, 403: E.noPermission },
+});
+registry.registerPath({
+  method: 'put', path: '/leave-balances', tags: ['Leaves'],
+  summary: 'Set or update a staff leave balance',
+  description: 'Upserts `(staffId, leaveTypeId, academicYearId)` leave balance.' + needs('leaves.manage'),
+  security: bearer,
+  request: { body: json(upsertLeaveBalanceSchema) },
+  responses: { 200: reply('Upserted balance', envelope('LeaveBalanceReply', LeaveBalance)), 400: E.validation, 401: E.unauthorized, 403: E.noPermission },
+});
+registry.registerPath({
+  method: 'patch', path: '/leave-balances/{id}', tags: ['Leaves'],
+  summary: 'Update a leave balance',
+  description: 'Updates allocated/used/carriedForward counts.' + needs('leaves.manage'),
+  security: bearer,
+  request: { params: idParam('The leave balance id'), body: json(updateLeaveBalanceSchema) },
+  responses: { 200: reply('Updated balance', envelope('LeaveBalancePatchReply', LeaveBalance)), 400: E.validation, 401: E.unauthorized, 403: E.noPermission, 404: fail('Not found', 'Leave balance not found') },
+});
+registry.registerPath({
+  method: 'delete', path: '/leave-balances/{id}', tags: ['Leaves'],
+  summary: 'Delete a leave balance',
+  description: 'Deletes a leave balance row.' + needs('leaves.manage'),
+  security: bearer,
+  request: { params: idParam('The leave balance id') },
+  responses: { 204: { description: 'Deleted' }, 401: E.unauthorized, 403: E.noPermission, 404: fail('Not found', 'Leave balance not found') },
+});
+
+// ------------------------------------------------------------------ Finance & Fees
+crud({
+  tag: 'Finance', base: '/fee-groups', module: 'finance', resourceName: 'fee group', idDesc: 'The fee group id',
+  item: FeeGroup, listQuery: listFeeGroupsSchema, paged: true,
+  withGetOne: true,
+  createBody: createFeeGroupSchema,
+  conflict: { description: 'Fee group name already exists.', message: 'A fee group with this name already exists' },
+  updateBody: updateFeeGroupSchema,
+  withDelete: true,
+});
+
+crud({
+  tag: 'Finance', base: '/fee-types', module: 'finance', resourceName: 'fee type', idDesc: 'The fee type id',
+  item: FeeType, listQuery: listFeeTypesSchema, paged: true,
+  withGetOne: true,
+  createBody: createFeeTypeSchema,
+  conflict: { description: 'Fee type code already exists.', message: 'A fee type with this code already exists' },
+  updateBody: updateFeeTypeSchema,
+  withDelete: true,
+});
+
+crud({
+  tag: 'Finance', base: '/fee-structures', module: 'finance', resourceName: 'fee structure', idDesc: 'The fee structure id',
+  item: FeeStructure, listQuery: listFeeStructuresSchema, paged: true,
+  withGetOne: true,
+  createBody: createFeeStructureSchema,
+  updateBody: updateFeeStructureSchema,
+  withDelete: true,
+});
+registry.registerPath({
+  method: 'post', path: '/fee-structures/{id}/items', tags: ['Finance'],
+  summary: 'Add item to a fee structure',
+  description: 'Adds a fee type line item to a fee structure.' + needs('finance.edit'),
+  security: bearer,
+  request: { params: idParam('The fee structure id'), body: json(feeStructureItemInputSchema) },
+  responses: { 201: reply('Added item', envelope('FeeStructureItemReply', FeeStructureItem)), 400: E.validation, 401: E.unauthorized, 403: E.noPermission, 404: fail('Not found', 'Fee structure not found') },
+});
+registry.registerPath({
+  method: 'patch', path: '/fee-structures/{id}/items/{itemId}', tags: ['Finance'],
+  summary: 'Update fee structure item',
+  description: 'Updates a fee structure item.' + needs('finance.edit'),
+  security: bearer,
+  request: { params: z.object({ id: z.string(), itemId: z.string() }), body: json(updateFeeStructureItemSchema) },
+  responses: { 200: reply('Updated', envelope('FeeStructureItemPatchReply', FeeStructureItem)), 400: E.validation, 401: E.unauthorized, 403: E.noPermission, 404: fail('Not found', 'Fee structure item not found') },
+});
+registry.registerPath({
+  method: 'delete', path: '/fee-structures/{id}/items/{itemId}', tags: ['Finance'],
+  summary: 'Delete fee structure item',
+  description: 'Removes an item from a fee structure.' + needs('finance.edit'),
+  security: bearer,
+  request: { params: z.object({ id: z.string(), itemId: z.string() }) },
+  responses: { 204: { description: 'Deleted' }, 401: E.unauthorized, 403: E.noPermission, 404: fail('Not found', 'Fee structure item not found') },
+});
+registry.registerPath({
+  method: 'post', path: '/fee-structures/{id}/installments', tags: ['Finance'],
+  summary: 'Add installment to a fee structure',
+  description: 'Adds an installment schedule entry to a fee structure.' + needs('finance.edit'),
+  security: bearer,
+  request: { params: idParam('The fee structure id'), body: json(feeInstallmentInputSchema) },
+  responses: { 201: reply('Added installment', envelope('FeeInstallmentReply', FeeInstallment)), 400: E.validation, 401: E.unauthorized, 403: E.noPermission, 404: fail('Not found', 'Fee structure not found') },
+});
+registry.registerPath({
+  method: 'patch', path: '/fee-structures/{id}/installments/{installmentId}', tags: ['Finance'],
+  summary: 'Update fee installment',
+  description: 'Updates an installment schedule entry.' + needs('finance.edit'),
+  security: bearer,
+  request: { params: z.object({ id: z.string(), installmentId: z.string() }), body: json(updateFeeInstallmentSchema) },
+  responses: { 200: reply('Updated', envelope('FeeInstallmentPatchReply', FeeInstallment)), 400: E.validation, 401: E.unauthorized, 403: E.noPermission, 404: fail('Not found', 'Fee installment not found') },
+});
+registry.registerPath({
+  method: 'delete', path: '/fee-structures/{id}/installments/{installmentId}', tags: ['Finance'],
+  summary: 'Delete fee installment',
+  description: 'Deletes an installment schedule entry.' + needs('finance.edit'),
+  security: bearer,
+  request: { params: z.object({ id: z.string(), installmentId: z.string() }) },
+  responses: { 204: { description: 'Deleted' }, 401: E.unauthorized, 403: E.noPermission, 404: fail('Not found', 'Fee installment not found') },
+});
+
+crud({
+  tag: 'Finance', base: '/fee-assignments', module: 'finance', resourceName: 'fee assignment', idDesc: 'The fee assignment id',
+  item: FeeAssignment, listQuery: listFeeAssignmentsSchema, paged: true,
+  withGetOne: true,
+  createBody: createFeeAssignmentSchema,
+  updateBody: updateFeeAssignmentSchema,
+  withDelete: true,
+});
+
+crud({
+  tag: 'Finance', base: '/invoices', module: 'finance', resourceName: 'invoice', idDesc: 'The invoice id',
+  item: Invoice, listQuery: listInvoicesSchema, paged: true,
+  withGetOne: true,
+  createBody: createInvoiceSchema,
+  conflict: { description: 'Invoice number already exists.', message: 'An invoice with this number already exists' },
+  updateBody: updateInvoiceSchema,
+});
+registry.registerPath({
+  method: 'post', path: '/invoices/generate-from-structure', tags: ['Finance'],
+  summary: 'Generate an invoice from a fee structure',
+  description: 'Creates an invoice + line items from a fee structure (optionally scaled to an installment and discounted).' + needs('finance.create'),
+  security: bearer,
+  request: { body: json(generateInvoiceFromStructureSchema) },
+  responses: { 201: reply('Generated invoice', envelope('InvoiceGenerateReply', Invoice)), 400: E.validation, 401: E.unauthorized, 403: E.noPermission },
+});
+registry.registerPath({
+  method: 'post', path: '/invoices/{id}/lines', tags: ['Finance'],
+  summary: 'Add line item to invoice',
+  description: 'Adds a line item to an open invoice.' + needs('finance.edit'),
+  security: bearer,
+  request: { params: idParam('The invoice id'), body: json(invoiceLineInputSchema) },
+  responses: { 201: reply('Added line', envelope('InvoiceLineReply', InvoiceLine)), 400: E.validation, 401: E.unauthorized, 403: E.noPermission, 404: fail('Not found', 'Invoice not found') },
+});
+registry.registerPath({
+  method: 'delete', path: '/invoices/{id}/lines/{lineId}', tags: ['Finance'],
+  summary: 'Delete line item from invoice',
+  description: 'Removes a line item from an open invoice.' + needs('finance.edit'),
+  security: bearer,
+  request: { params: z.object({ id: z.string(), lineId: z.string() }) },
+  responses: { 204: { description: 'Deleted' }, 401: E.unauthorized, 403: E.noPermission, 404: fail('Not found', 'Invoice line not found') },
+});
+
+crud({
+  tag: 'Finance', base: '/payments', module: 'finance', resourceName: 'payment', idDesc: 'The payment id',
+  item: Payment, listQuery: listPaymentsSchema, paged: true,
+  withGetOne: true,
+  createBody: createPaymentSchema,
+  createDescription: 'Records a payment. If `idempotencyKey` was previously used in this school, replays the original payment.',
+  conflict: { description: 'Duplicate receipt number.', message: 'A payment with this receipt number already exists' },
+  updateBody: updatePaymentSchema,
+});
+
+// ------------------------------------------------------------------ Expenses
+crud({
+  tag: 'Expenses', base: '/expense-categories', module: 'expenses', resourceName: 'expense category', idDesc: 'The expense category id',
+  item: ExpenseCategory, listQuery: listExpenseCategoriesSchema, paged: true,
+  withGetOne: true,
+  createBody: createExpenseCategorySchema,
+  conflict: { description: 'Expense category name already exists.', message: 'An expense category with this name already exists' },
+  updateBody: updateExpenseCategorySchema,
+  withDelete: true,
+});
+
+crud({
+  tag: 'Expenses', base: '/expenses', module: 'expenses', resourceName: 'expense', idDesc: 'The expense id',
+  item: Expense, listQuery: listExpensesSchema, paged: true,
+  withGetOne: true,
+  createBody: createExpenseSchema,
+  conflict: { description: 'Duplicate expenseNo.', message: 'An expense with this expenseNo already exists' },
+  updateBody: updateExpenseSchema,
+  withDelete: true,
+});
+registry.registerPath({
+  method: 'post', path: '/expenses/{id}/decide', tags: ['Expenses'],
+  summary: 'Approve or reject an expense',
+  description: 'Moves a `submitted` expense to `approved` or `rejected`.' + needs('expenses.approve'),
+  security: bearer,
+  request: { params: idParam('The expense id'), body: json(decideExpenseSchema) },
+  responses: { 200: reply('Decided expense', envelope('ExpenseDecideReply', Expense)), 401: E.unauthorized, 403: E.noPermission, 404: fail('Not found', 'Expense not found'), 409: fail('Conflict', 'Expense is already decided') },
+});
+registry.registerPath({
+  method: 'post', path: '/expenses/{id}/mark-paid', tags: ['Expenses'],
+  summary: 'Mark an approved expense as paid',
+  description: 'Moves an `approved` expense to `paid` and records `paidAt`.' + needs('expenses.approve'),
+  security: bearer,
+  request: { params: idParam('The expense id'), body: json(markExpensePaidSchema) },
+  responses: { 200: reply('Paid expense', envelope('ExpensePaidReply', Expense)), 401: E.unauthorized, 403: E.noPermission, 404: fail('Not found', 'Expense not found'), 409: fail('Conflict', 'Only approved expenses can be marked paid') },
+});
+
+// ------------------------------------------------------------------ Gate Pass (exit_passes)
+crud({
+  tag: 'Gate Pass', base: '/exit-passes', module: 'gatepass', resourceName: 'exit pass', idDesc: 'The exit pass id',
+  item: ExitPass, listQuery: listExitPassesSchema, paged: true,
+  withGetOne: true,
+  createBody: createExitPassSchema,
+  conflict: { description: 'Duplicate passCode.', message: 'An exit pass with this passCode already exists' },
+  updateBody: updateExitPassSchema,
+});
+registry.registerPath({
+  method: 'post', path: '/exit-passes/verify', tags: ['Gate Pass'],
+  summary: 'Verify an exit pass code at the gate',
+  description: 'Looks up an exit pass by `passCode` and reports whether it is currently valid for gate exit.' + needs('gatepass.view'),
+  security: bearer,
+  request: { body: json(verifyExitPassSchema) },
+  responses: { 200: reply('Verification result', envelope('ExitPassVerifyReply', z.object({ valid: z.boolean(), pass: ExitPass, student: z.object({ id: z.string(), admissionNo: z.string(), fullName: z.string().nullable() }).nullable() }))), 401: E.unauthorized, 403: E.noPermission, 404: fail('Not found', 'Exit pass not found for this passCode') },
+});
+registry.registerPath({
+  method: 'post', path: '/exit-passes/{id}/decide', tags: ['Gate Pass'],
+  summary: 'Approve or reject an exit pass',
+  description: 'Approves or rejects a `pending` exit pass.' + needs('gatepass.approve'),
+  security: bearer,
+  request: { params: idParam('The exit pass id'), body: json(decideExitPassSchema) },
+  responses: { 200: reply('Updated exit pass', envelope('ExitPassDecideReply', ExitPass)), 401: E.unauthorized, 403: E.noPermission, 404: fail('Not found', 'Exit pass not found'), 409: fail('Conflict', 'Exit pass is already decided') },
+});
+registry.registerPath({
+  method: 'post', path: '/exit-passes/{id}/revoke', tags: ['Gate Pass'],
+  summary: 'Revoke an exit pass',
+  description: 'Revokes a `pending` or `approved` exit pass.' + needs('gatepass.edit'),
+  security: bearer,
+  request: { params: idParam('The exit pass id') },
+  responses: { 200: reply('Revoked exit pass', envelope('ExitPassRevokeReply', ExitPass)), 401: E.unauthorized, 403: E.noPermission, 404: fail('Not found', 'Exit pass not found'), 409: fail('Conflict', 'Cannot revoke this exit pass') },
+});
+registry.registerPath({
+  method: 'post', path: '/exit-passes/{id}/use', tags: ['Gate Pass'],
+  summary: 'Verify pickup and mark exit pass used at the gate',
+  description: 'Consumes an `approved` exit pass at the gate, validating `student_guardians.canPickUp` when picked up by a guardian.' + needs('gatepass.edit'),
+  security: bearer,
+  request: { params: idParam('The exit pass id'), body: json(useExitPassSchema) },
+  responses: { 200: reply('Used exit pass', envelope('ExitPassUseReply', ExitPass)), 401: E.unauthorized, 403: E.noPermission, 404: fail('Not found', 'Exit pass not found'), 409: fail('Conflict', 'Exit pass cannot be used') },
+});
+registry.registerPath({
+  method: 'post', path: '/exit-passes/{id}/return', tags: ['Gate Pass'],
+  summary: 'Record student return for a used exit pass',
+  description: 'Sets `actualReturnAt` on a `used` exit pass.' + needs('gatepass.edit'),
+  security: bearer,
+  request: { params: idParam('The exit pass id'), body: json(returnExitPassSchema) },
+  responses: { 200: reply('Updated exit pass', envelope('ExitPassReturnReply', ExitPass)), 401: E.unauthorized, 403: E.noPermission, 404: fail('Not found', 'Exit pass not found'), 409: fail('Conflict', 'Only used exit passes can record student return') },
+});
+
 // ---------------------------------------------------------------- the document
 const DESCRIPTION = `
 The API behind the Karkaii School ERP. One person has **one account** and can belong to **many schools** with a different role in each.
@@ -826,6 +1204,12 @@ export function buildOpenApiDocument() {
       { name: 'Students', description: 'Student profiles, student-guardian links and student documents' },
       { name: 'Guardians', description: 'Parent/guardian profiles reusable across siblings' },
       { name: 'Student Houses', description: 'School houses for inter-house events' },
+      { name: 'Attendance', description: 'Student/staff daily attendance and threshold rules' },
+      { name: 'Calendar', description: 'Academic calendar events and holidays (eventType=holiday)' },
+      { name: 'Leaves', description: 'Leave types, leave requests, approvals and staff balances' },
+      { name: 'Finance', description: 'Fee groups, fee types, fee structures, assignments, invoices and idempotent payments' },
+      { name: 'Expenses', description: 'Expense categories and expense approval/payment workflow' },
+      { name: 'Gate Pass', description: 'Student early-exit passes, pickup authorization, approval and gate verification' },
     ],
   });
 }
