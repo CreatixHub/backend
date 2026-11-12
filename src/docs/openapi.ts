@@ -30,10 +30,20 @@ import {
   updateAssetSchema, updateCategorySchema, updateMaintenanceSchema,
 } from '../modules/assets/assets.schemas';
 import {
-  Asset, AssetAllocation, AssetCategory, AssetMaintenance, ClassRow, ClassSubject, CreatedOrganization,
-  CurrentOrganization, Driver, ErrorResponse, Health, Homework, HomeworkSubmission, Me, Member, Permission,
-  PickupPoint, Role, RouteSchedule, SchoolSummary, Section, SectionTeacher, SessionData, Staff, Subject,
-  TimeSlot, TimetableEntry, TransportAssignment, TransportRoute, Vehicle,
+  acceptAdmissionSchema, changeAdmissionStatusSchema, createAdmissionSchema, listAdmissionsSchema,
+  updateAdmissionSchema,
+} from '../modules/admissions/admissions.schemas';
+import {
+  createGuardianSchema, createStudentDocumentSchema, createStudentHouseSchema, createStudentSchema,
+  linkStudentGuardianSchema, listGuardiansSchema, listStudentHousesSchema, listStudentsSchema,
+  updateGuardianSchema, updateStudentDocumentSchema, updateStudentGuardianSchema, updateStudentHouseSchema,
+  updateStudentSchema, updateStudentStatusSchema, verifyStudentDocumentSchema,
+} from '../modules/students/students.schemas';
+import {
+  Admission, AdmissionStatusHistoryItem, Asset, AssetAllocation, AssetCategory, AssetMaintenance, ClassRow, ClassSubject, CreatedOrganization,
+  CurrentOrganization, Driver, ErrorResponse, Guardian, Health, Homework, HomeworkSubmission, Me, Member, Permission,
+  PickupPoint, Role, RouteSchedule, SchoolSummary, Section, SectionTeacher, SessionData, Staff, Student, StudentDocument,
+  StudentGuardian, StudentHouse, Subject, TimeSlot, TimetableEntry, TransportAssignment, TransportRoute, Vehicle,
   envelope, pagedEnvelope,
 } from './schemas';
 
@@ -634,6 +644,148 @@ crud({
   withDelete: true, deleteSummary: 'Cancel a maintenance record', deleteDescription: 'Sets status to cancelled rather than deleting the row.',
 });
 
+// ---------------------------------------------------------------- Admissions
+crud({
+  tag: 'Admissions', base: '/admissions', module: 'admissions', resourceName: 'admission', idDesc: 'The admission id from GET /admissions',
+  item: Admission, listQuery: listAdmissionsSchema, paged: true,
+  listDescription: 'Paged. `q` searches application number, applicant name, guardian name/phone and email.',
+  withGetOne: true,
+  createBody: createAdmissionSchema,
+  createExample: {
+    academicYearId: '1', classId: '301', firstName: 'Aarav', lastName: 'Sharma', dob: '2016-04-12',
+    guardianName: 'Rajesh Sharma', guardianPhone: '9876543210', source: 'walk_in',
+  },
+  conflict: { description: 'That application number is already used in this school.', message: 'That application number is already used in this school' },
+  updateBody: updateAdmissionSchema, updateExample: { feePaid: true, feePaidOn: '2026-11-12', feePaymentMethod: 'upi' },
+  withDelete: true, deleteSummary: 'Delete a non-accepted admission', deleteDescription: 'Soft delete; accepted admissions linked to a student cannot be deleted.',
+});
+
+registry.registerPath({
+  method: 'get', path: '/admissions/{id}/history', tags: ['Admissions'], summary: 'Admission status history',
+  description: `Audit trail of every status change on an admission.${needs('admissions.view')}`,
+  security: bearer, request: { params: idParam('The admission id from GET /admissions') },
+  responses: { 200: reply('Chronological status history.', envelope('AdmissionHistoryResponse', z.array(AdmissionStatusHistoryItem))), 401: E.unauthorized, 403: E.noPermission, 404: fail('No such admission in this school.', 'Admission not found') },
+});
+
+registry.registerPath({
+  method: 'post', path: '/admissions/{id}/status', tags: ['Admissions'], summary: 'Transition admission status',
+  description: `Updates the admission status and appends a row to \`admission_status_history\`. Setting \`status: "accepted"\` atomically creates the student, primary guardian and student-guardian link.${needs('admissions.edit')}`,
+  security: bearer,
+  request: { params: idParam('The admission id from GET /admissions'), body: { required: true, ...json(changeAdmissionStatusSchema, { status: 'shortlisted', note: 'Documents verified' }) } },
+  responses: { 200: reply('Updated admission with history.', envelope('AdmissionStatusResponse', Admission)), 400: E.validation, 401: E.unauthorized, 403: E.noPermission, 404: fail('No such admission in this school.', 'Admission not found'), 409: fail('Invalid status transition or already accepted.', 'An accepted admission cannot change status') },
+});
+
+registry.registerPath({
+  method: 'post', path: '/admissions/{id}/accept', tags: ['Admissions'], summary: 'Accept an admission and enrol student',
+  description: `Transitions the admission to \`accepted\`, creates the student and guardian records in one transaction, and links them.${needs('admissions.edit')}`,
+  security: bearer,
+  request: { params: idParam('The admission id from GET /admissions'), body: { ...json(acceptAdmissionSchema, { decisionNotes: 'Welcome!' }) } },
+  responses: { 200: reply('Accepted admission with linked student and history.', envelope('AcceptAdmissionResponse', Admission)), 400: E.validation, 401: E.unauthorized, 403: E.noPermission, 404: fail('No such admission in this school.', 'Admission not found'), 409: fail('Already accepted or terminal.', 'An accepted admission cannot change status') },
+});
+
+// ---------------------------------------------------------------- Students, Guardians, Documents & Houses
+crud({
+  tag: 'Students', base: '/students', module: 'students', resourceName: 'student', idDesc: 'The student id from GET /students',
+  item: Student, listQuery: listStudentsSchema, paged: true,
+  listDescription: 'Paged. `q` searches admission number and student name.',
+  withGetOne: true,
+  createBody: createStudentSchema,
+  createExample: { firstName: 'Meera', lastName: 'Nair', dob: '2015-08-20', admittedOn: '2026-06-01' },
+  conflict: { description: 'Admission number or admission link is already used in this school.', message: 'That admission number or admission link is already used in this school' },
+  updateBody: updateStudentSchema, updateExample: { bloodGroup: 'O+' },
+  withDelete: true, deleteSummary: 'Soft-delete a student',
+});
+
+registry.registerPath({
+  method: 'patch', path: '/students/{id}/status', tags: ['Students'], summary: 'Update student status',
+  description: `Requires \`leftOn\` when status is \`alumni\`, \`transferred_out\` or \`expelled\`.${needs('students.edit')}`,
+  security: bearer,
+  request: { params: idParam('The student id from GET /students'), body: { required: true, ...json(updateStudentStatusSchema, { status: 'transferred_out', leftOn: '2027-03-31', leftReason: 'Relocated' }) } },
+  responses: { 200: reply('Updated student.', envelope('UpdateStudentStatusResponse', Student)), 400: E.validation, 401: E.unauthorized, 403: E.noPermission, 404: fail('No such student in this school.', 'Student not found') },
+});
+
+registry.registerPath({
+  method: 'get', path: '/students/{id}/guardians', tags: ['Students'], summary: 'List guardians of a student',
+  description: needs('students.view'), security: bearer, request: { params: idParam('The student id from GET /students') },
+  responses: { 200: reply('Guardians linked to this student.', envelope('StudentGuardianListResponse', z.array(StudentGuardian))), 401: E.unauthorized, 403: E.noPermission, 404: fail('No such student in this school.', 'Student not found') },
+});
+
+registry.registerPath({
+  method: 'post', path: '/students/{id}/guardians', tags: ['Students'], summary: 'Link or create-and-link a guardian for a student',
+  description: `Send \`guardianId\` to link an existing guardian (e.g. a sibling's parent) or \`guardian\` to create a new guardian profile and link it.${needs('students.edit')}`,
+  security: bearer,
+  request: { params: idParam('The student id from GET /students'), body: { required: true, ...json(linkStudentGuardianSchema, { guardianId: '902', isPrimary: true, canPickUp: true }) } },
+  responses: { 201: reply('Updated guardians list for the student.', envelope('LinkStudentGuardianResponse', z.array(StudentGuardian))), 400: E.validation, 401: E.unauthorized, 403: E.noPermission, 404: fail('No such student in this school.', 'Student not found'), 409: fail('Already linked.', 'This guardian is already linked to this student') },
+});
+
+registry.registerPath({
+  method: 'patch', path: '/students/{id}/guardians/{guardianId}', tags: ['Students'], summary: 'Update primary guardian or pickup authorization',
+  description: needs('students.edit'), security: bearer,
+  request: { params: z.object({ id: z.string(), guardianId: z.string() }), body: { required: true, ...json(updateStudentGuardianSchema, { isPrimary: true, canPickUp: true }) } },
+  responses: { 200: reply('Updated guardians list for the student.', envelope('UpdateStudentGuardianResponse', z.array(StudentGuardian))), 400: E.validation, 401: E.unauthorized, 403: E.noPermission, 404: fail('Student or guardian link not found.', 'Guardian is not linked to this student') },
+});
+
+registry.registerPath({
+  method: 'delete', path: '/students/{id}/guardians/{guardianId}', tags: ['Students'], summary: 'Unlink a guardian from a student',
+  description: needs('students.edit'), security: bearer,
+  request: { params: z.object({ id: z.string(), guardianId: z.string() }) },
+  responses: { 204: { description: 'Unlinked. No body.' }, 401: E.unauthorized, 403: E.noPermission, 404: fail('Student or guardian link not found.', 'Guardian is not linked to this student') },
+});
+
+registry.registerPath({
+  method: 'get', path: '/students/{id}/documents', tags: ['Students'], summary: 'List documents for a student',
+  description: needs('students.view'), security: bearer, request: { params: idParam('The student id from GET /students') },
+  responses: { 200: reply('Student documents.', envelope('StudentDocumentListResponse', z.array(StudentDocument))), 401: E.unauthorized, 403: E.noPermission, 404: fail('No such student in this school.', 'Student not found') },
+});
+
+registry.registerPath({
+  method: 'post', path: '/students/{id}/documents', tags: ['Students'], summary: 'Add a document to a student',
+  description: needs('students.edit'), security: bearer,
+  request: { params: idParam('The student id from GET /students'), body: { required: true, ...json(createStudentDocumentSchema, { documentType: 'birth_certificate', fileId: '1' }) } },
+  responses: { 201: reply('Document added.', envelope('CreateStudentDocumentResponse', StudentDocument)), 400: E.validation, 401: E.unauthorized, 403: E.noPermission, 404: fail('No such student in this school.', 'Student not found') },
+});
+
+registry.registerPath({
+  method: 'patch', path: '/students/{id}/documents/{docId}', tags: ['Students'], summary: 'Update a student document',
+  description: needs('students.edit'), security: bearer,
+  request: { params: z.object({ id: z.string(), docId: z.string() }), body: { required: true, ...json(updateStudentDocumentSchema, { documentNo: 'BC-12345' }) } },
+  responses: { 200: reply('Updated document.', envelope('UpdateStudentDocumentResponse', StudentDocument)), 400: E.validation, 401: E.unauthorized, 403: E.noPermission, 404: fail('No such document in this school.', 'Student document not found') },
+});
+
+registry.registerPath({
+  method: 'patch', path: '/students/{id}/documents/{docId}/verify', tags: ['Students'], summary: 'Verify or reject a student document',
+  description: needs('students.edit'), security: bearer,
+  request: { params: z.object({ id: z.string(), docId: z.string() }), body: { required: true, ...json(verifyStudentDocumentSchema, { verifiedStatus: 'verified', remarks: 'Original verified' }) } },
+  responses: { 200: reply('Verified/rejected document.', envelope('VerifyStudentDocumentResponse', StudentDocument)), 400: E.validation, 401: E.unauthorized, 403: E.noPermission, 404: fail('No such document in this school.', 'Student document not found') },
+});
+
+registry.registerPath({
+  method: 'delete', path: '/students/{id}/documents/{docId}', tags: ['Students'], summary: 'Delete a student document',
+  description: needs('students.edit'), security: bearer,
+  request: { params: z.object({ id: z.string(), docId: z.string() }) },
+  responses: { 204: { description: 'Deleted. No body.' }, 401: E.unauthorized, 403: E.noPermission, 404: fail('No such document in this school.', 'Student document not found') },
+});
+
+crud({
+  tag: 'Guardians', base: '/guardians', module: 'students', resourceName: 'guardian', idDesc: 'The guardian id from GET /guardians',
+  item: Guardian, listQuery: listGuardiansSchema, paged: true,
+  listDescription: 'Paged. `q` searches full name, phone and email.',
+  withGetOne: true,
+  createBody: createGuardianSchema, createExample: { fullName: 'Sunita Sharma', relation: 'mother', phone: '9876543211', isEmergencyContact: true },
+  updateBody: updateGuardianSchema, updateExample: { occupation: 'Architect' },
+  withDelete: true,
+});
+
+crud({
+  tag: 'Student Houses', base: '/student-houses', module: 'students', resourceName: 'student house', idDesc: 'The house id from GET /student-houses',
+  item: StudentHouse, listQuery: listStudentHousesSchema,
+  withGetOne: true,
+  createBody: createStudentHouseSchema, createExample: { name: 'Sapphire House', color: '#2563EB', motto: 'Strive for Excellence' },
+  conflict: { description: 'A house with that name already exists in this school.', message: 'A student house with that name already exists in this school' },
+  updateBody: updateStudentHouseSchema, updateExample: { color: '#1D4ED8' },
+  withDelete: true,
+});
+
 // ---------------------------------------------------------------- the document
 const DESCRIPTION = `
 The API behind the Karkaii School ERP. One person has **one account** and can belong to **many schools** with a different role in each.
@@ -670,6 +822,10 @@ export function buildOpenApiDocument() {
       { name: 'Homework', description: 'Homework (basic LMS) and its submissions' },
       { name: 'Transport', description: 'Vehicles, drivers, routes, pickup points, schedules, assignments' },
       { name: 'Assets', description: 'Categories, assets, allocations, maintenance' },
+      { name: 'Admissions', description: 'Admission applications, status transitions and history' },
+      { name: 'Students', description: 'Student profiles, student-guardian links and student documents' },
+      { name: 'Guardians', description: 'Parent/guardian profiles reusable across siblings' },
+      { name: 'Student Houses', description: 'School houses for inter-house events' },
     ],
   });
 }
