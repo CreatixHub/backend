@@ -9,7 +9,9 @@ import type { CreateOrganizationInput, UpdateOrganizationInput } from './organiz
 
 const UNIQUE_VIOLATION = '23505';
 function isUniqueViolation(e: unknown): boolean {
-  return typeof e === 'object' && e !== null && 'code' in e && (e as { code: unknown }).code === UNIQUE_VIOLATION;
+  if (typeof e !== 'object' || e === null) return false;
+  const err = e as { code?: unknown; cause?: { code?: unknown } };
+  return err.code === UNIQUE_VIOLATION || err.cause?.code === UNIQUE_VIOLATION;
 }
 
 // CREATE A SCHOOL. The signed-in person becomes its owner. ONE transaction: if any step fails, nothing is saved.
@@ -33,13 +35,15 @@ export async function createOrganization(input: CreateOrganizationInput, user: A
           .values({ tenantId: org.id, code: def.code, name: def.name, description: def.description, isSystem: true })
           .returning({ id: roles.id });
         if (def.code === 'owner') ownerRoleId = role.id;
-        await tx.insert(rolePermissions).values(
-          def.permissions.map((code) => {
-            const id = permissionId.get(code);
-            if (!id) throw new Error(`Permission "${code}" is not in the database - run: npx tsx src/seed.ts`);
-            return { roleId: role.id, permissionId: id, tenantId: org.id };
-          }),
-        );
+        if (def.permissions.length > 0) {
+          await tx.insert(rolePermissions).values(
+            def.permissions.map((code) => {
+              const id = permissionId.get(code);
+              if (!id) throw new Error(`Permission "${code}" is not in the database - run: npx tsx src/seed.ts`);
+              return { roleId: role.id, permissionId: id, tenantId: org.id };
+            }),
+          );
+        }
       }
       if (!ownerRoleId) throw new Error('DEFAULT_ROLES must contain an "owner" role');
 

@@ -38,6 +38,8 @@ import {
   assetMaintenanceRouter,
   assetsRouter,
 } from "./modules/assets/assets.routes";
+import { admissionsRouter } from "./modules/admissions/admissions.routes";
+import { guardiansRouter, studentHousesRouter, studentsRouter } from "./modules/students/students.routes";
 // Building the app in a function (instead of starting the server here) lets tests use it too.
 // The ORDER of the lines below is the security design: Express runs them top to bottom.
 export function createApp() {
@@ -99,8 +101,12 @@ app.use("/api/route-schedules", routeSchedulesRouter);
 app.use("/api/transport-assignments", transportAssignmentsRouter);
 app.use("/api/asset-categories", assetCategoriesRouter);
 app.use("/api/assets", assetsRouter);
-app.use("/api/asset-allocations", assetAllocationsRouter);
-app.use("/api/asset-maintenance", assetMaintenanceRouter);
+  app.use("/api/asset-allocations", assetAllocationsRouter);
+  app.use("/api/asset-maintenance", assetMaintenanceRouter);
+  app.use("/api/admissions", admissionsRouter);
+  app.use("/api/students", studentsRouter);
+  app.use("/api/guardians", guardiansRouter);
+  app.use("/api/student-houses", studentHousesRouter);
 
   app.use((_req, _res, next) => next(new HttpError(404, "Not found"))); // nothing matched
   app.use(errorHandler); // must be the very last line

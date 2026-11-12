@@ -767,7 +767,10 @@ export const transportAssignments = pgTable(
     tenantId: plainBigint("tenant_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
-    studentId: plainBigint("student_id"), // students table not built yet
+    studentId: plainBigint("student_id").references((): AnyPgColumn => students.id, {
+      onDelete: "restrict",
+      onUpdate: "cascade",
+    }),
     staffId: plainBigint("staff_id").references(() => staff.id, { onDelete: "restrict", onUpdate: "cascade" }),
     academicYearId: plainBigint("academic_year_id").notNull(), // academic_years table not built yet
     routeId: plainBigint("route_id")
@@ -791,7 +794,6 @@ export const transportAssignments = pgTable(
 
 // ================================================================ ASSETS (spec §12)
 // vendors and branches tables do not exist yet -> plain bigint columns, no FK.
-// students table does not exist yet -> asset_allocations.student_id has no FK.
 
 export const assetCategories = pgTable(
   'asset_categories',
@@ -858,7 +860,7 @@ export const assetAllocations = pgTable(
       .notNull()
       .references(() => assets.id),
     staffId: plainBigint('staff_id').references(() => staff.id),
-    studentId: plainBigint('student_id'), // no FK: students table not built yet
+    studentId: plainBigint('student_id').references((): AnyPgColumn => students.id),
     classroomId: plainBigint('classroom_id').references(() => classrooms.id),
     allocatedOn: date('allocated_on'),
     expectedReturnOn: date('expected_return_on'),
@@ -914,6 +916,268 @@ export const assetMaintenance = pgTable(
   ],
 );
 
+// ================================================================ ADMISSIONS (spec §1) & STUDENTS (spec §2)
+// academic_years, religions, cities, languages and files tables do not exist yet -> plain bigint columns, no FK.
+
+export const studentHouses = pgTable(
+  "student_houses",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    name: text("name").notNull(),
+    color: text("color"),
+    motto: text("motto"),
+    houseMasterId: plainBigint("house_master_id").references(() => staff.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    isActive: boolean("is_active").notNull().default(true),
+    deletedBy: plainBigint("deleted_by").references(() => users.id, { onDelete: "set null", onUpdate: "cascade" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    deletedAt: ts("deleted_at"),
+  },
+  (t) => [
+    uniqueIndex("student_houses_tenant_id_name_key")
+      .on(t.tenantId, t.name)
+      .where(sql`${t.deletedAt} IS NULL`),
+  ],
+);
+
+export const guardians = pgTable(
+  "guardians",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    fullName: text("full_name").notNull(),
+    relation: text("relation").notNull(), // father | mother | guardian | other
+    phone: text("phone").notNull(),
+    altPhone: text("alt_phone"),
+    email: text("email"),
+    occupation: text("occupation"),
+    annualIncome: numeric("annual_income", { precision: 12, scale: 2 }),
+    addressLine1: text("address_line1"),
+    addressLine2: text("address_line2"),
+    cityId: plainBigint("city_id"), // cities table not built yet
+    postalCode: text("postal_code"),
+    photoFileId: plainBigint("photo_file_id"), // files table not built yet
+    idProofType: text("id_proof_type"),
+    idProofNo: text("id_proof_no"),
+    isEmergencyContact: boolean("is_emergency_contact").notNull().default(false),
+    deletedBy: plainBigint("deleted_by").references(() => users.id, { onDelete: "set null", onUpdate: "cascade" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    deletedAt: ts("deleted_at"),
+  },
+  (t) => [index("guardians_tenant_id_phone_idx").on(t.tenantId, t.phone)],
+);
+
+export const students = pgTable(
+  "students",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    userId: plainBigint("user_id").references(() => users.id, { onDelete: "set null", onUpdate: "cascade" }),
+    admissionId: plainBigint("admission_id").references((): AnyPgColumn => admissions.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    admissionNo: text("admission_no").notNull(),
+    firstName: text("first_name").notNull(),
+    lastName: text("last_name").notNull(),
+    fullName: text("full_name"),
+    dob: date("dob").notNull(),
+    gender: text("gender"),
+    bloodGroup: text("blood_group"),
+    religionId: plainBigint("religion_id"), // religions table not built yet
+    socialCategory: text("social_category"),
+    motherTongueId: plainBigint("mother_tongue_id"), // languages table not built yet
+    photoFileId: plainBigint("photo_file_id"), // files table not built yet
+    fatherName: text("father_name"),
+    fatherPhone: text("father_phone"),
+    fatherEmail: text("father_email"),
+    fatherOccupation: text("father_occupation"),
+    motherName: text("mother_name"),
+    motherPhone: text("mother_phone"),
+    motherEmail: text("mother_email"),
+    motherOccupation: text("mother_occupation"),
+    primaryGuardianId: plainBigint("primary_guardian_id").references(() => guardians.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    addressLine1: text("address_line1"),
+    addressLine2: text("address_line2"),
+    cityId: plainBigint("city_id"), // cities table not built yet
+    postalCode: text("postal_code"),
+    studentHouseId: plainBigint("student_house_id").references(() => studentHouses.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    status: text("status").notNull().default("active"), // active | inactive | alumni | transferred_out | expelled
+    admittedOn: date("admitted_on").notNull(),
+    leftOn: date("left_on"),
+    leftReason: text("left_reason"),
+    deletedBy: plainBigint("deleted_by").references(() => users.id, { onDelete: "set null", onUpdate: "cascade" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    deletedAt: ts("deleted_at"),
+  },
+  (t) => [
+    uniqueIndex("students_tenant_id_admission_no_key").on(t.tenantId, t.admissionNo),
+    uniqueIndex("students_admission_id_key").on(t.admissionId),
+    index("students_tenant_id_status_idx").on(t.tenantId, t.status),
+    index("students_tenant_id_student_house_id_idx").on(t.tenantId, t.studentHouseId),
+    index("students_user_id_idx").on(t.userId),
+  ],
+);
+
+export const studentGuardians = pgTable(
+  "student_guardians",
+  {
+    studentId: plainBigint("student_id")
+      .notNull()
+      .references(() => students.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    guardianId: plainBigint("guardian_id")
+      .notNull()
+      .references(() => guardians.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    isPrimary: boolean("is_primary").notNull().default(false),
+    canPickUp: boolean("can_pick_up").notNull().default(false),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.studentId, t.guardianId] }),
+    index("student_guardians_tenant_id_idx").on(t.tenantId),
+    index("student_guardians_guardian_id_idx").on(t.guardianId),
+  ],
+);
+
+export const studentDocuments = pgTable(
+  "student_documents",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    studentId: plainBigint("student_id")
+      .notNull()
+      .references(() => students.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    documentType: text("document_type").notNull(),
+    fileId: plainBigint("file_id").notNull(), // files table not built yet
+    documentNo: text("document_no"),
+    issuedOn: date("issued_on"),
+    expiresOn: date("expires_on"),
+    verifiedStatus: text("verified_status").notNull().default("pending"), // pending | verified | rejected
+    verifiedBy: plainBigint("verified_by").references(() => users.id, { onDelete: "set null", onUpdate: "cascade" }),
+    verifiedAt: ts("verified_at"),
+    remarks: text("remarks"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index("student_documents_tenant_id_student_id_idx").on(t.tenantId, t.studentId)],
+);
+
+export const admissions = pgTable(
+  "admissions",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    applicationNo: text("application_no").notNull(),
+    academicYearId: plainBigint("academic_year_id").notNull(), // academic_years table not built yet
+    classId: plainBigint("class_id")
+      .notNull()
+      .references(() => classes.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    firstName: text("first_name").notNull(),
+    lastName: text("last_name").notNull(),
+    dob: date("dob").notNull(),
+    gender: text("gender"),
+    email: text("email"),
+    phone: text("phone"),
+    bloodGroup: text("blood_group"),
+    religionId: plainBigint("religion_id"), // religions table not built yet
+    socialCategory: text("social_category"),
+    fatherName: text("father_name"),
+    fatherPhone: text("father_phone"),
+    fatherEmail: text("father_email"),
+    fatherOccupation: text("father_occupation"),
+    motherName: text("mother_name"),
+    motherPhone: text("mother_phone"),
+    motherEmail: text("mother_email"),
+    motherOccupation: text("mother_occupation"),
+    guardianName: text("guardian_name").notNull(),
+    guardianPhone: text("guardian_phone").notNull(),
+    guardianEmail: text("guardian_email"),
+    previousSchool: text("previous_school"),
+    previousClass: text("previous_class"),
+    addressLine1: text("address_line1"),
+    addressLine2: text("address_line2"),
+    cityId: plainBigint("city_id"), // cities table not built yet
+    postalCode: text("postal_code"),
+    status: text("status").notNull().default("applied"), // enquiry | applied | document_review | shortlisted | waitlisted | offered | accepted | rejected | withdrawn
+    appliedOn: date("applied_on").notNull(),
+    acknowledgedAt: ts("acknowledged_at"),
+    decisionOn: date("decision_on"),
+    decidedBy: plainBigint("decided_by").references(() => users.id, { onDelete: "set null", onUpdate: "cascade" }),
+    decisionNotes: text("decision_notes"),
+    rejectionReason: text("rejection_reason"),
+    waitlistPosition: smallint("waitlist_position"),
+    assignedToStaffId: plainBigint("assigned_to_staff_id").references(() => staff.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    needsTransport: boolean("needs_transport").notNull().default(false),
+    needsHostel: boolean("needs_hostel").notNull().default(false),
+    applicationFee: numeric("application_fee", { precision: 12, scale: 2 }),
+    feePaid: boolean("fee_paid").notNull().default(false),
+    feePaidOn: date("fee_paid_on"),
+    feePaymentMethod: text("fee_payment_method"),
+    source: text("source").notNull(), // walk_in | website | referral | agent | event | other
+    studentId: plainBigint("student_id").references(() => students.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    deletedAt: ts("deleted_at"),
+  },
+  (t) => [
+    uniqueIndex("admissions_tenant_id_application_no_key").on(t.tenantId, t.applicationNo),
+    uniqueIndex("admissions_student_id_key").on(t.studentId),
+    index("admissions_tenant_id_academic_year_id_idx").on(t.tenantId, t.academicYearId),
+    index("admissions_tenant_id_class_id_idx").on(t.tenantId, t.classId),
+    index("admissions_tenant_id_status_idx").on(t.tenantId, t.status),
+  ],
+);
+
+export const admissionStatusHistory = pgTable(
+  "admission_status_history",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    admissionId: plainBigint("admission_id")
+      .notNull()
+      .references(() => admissions.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    fromStatus: text("from_status"),
+    toStatus: text("to_status").notNull(),
+    note: text("note"),
+    changedBy: plainBigint("changed_by").references(() => users.id, { onDelete: "set null", onUpdate: "cascade" }),
+    createdAt: createdAt(),
+  },
+  (t) => [index("admission_status_history_tenant_id_admission_id_idx").on(t.tenantId, t.admissionId)],
+);
+
 export const assetCategoriesRelations = relations(assetCategories, ({ one, many }) => ({
   parent: one(assetCategories, {
     fields: [assetCategories.parentId],
@@ -934,6 +1198,7 @@ export const assetsRelations = relations(assets, ({ one, many }) => ({
 export const assetAllocationsRelations = relations(assetAllocations, ({ one }) => ({
   asset: one(assets, { fields: [assetAllocations.assetId], references: [assets.id] }),
   staff: one(staff, { fields: [assetAllocations.staffId], references: [staff.id] }),
+  student: one(students, { fields: [assetAllocations.studentId], references: [students.id] }),
   classroom: one(classrooms, { fields: [assetAllocations.classroomId], references: [classrooms.id] }),
 }));
 
@@ -1061,4 +1326,54 @@ export const routeSchedulesRelations = relations(routeSchedules, ({ one }) => ({
 export const transportAssignmentsRelations = relations(transportAssignments, ({ one }) => ({
   route: one(transportRoutes, { fields: [transportAssignments.routeId], references: [transportRoutes.id] }),
   pickupPoint: one(pickupPoints, { fields: [transportAssignments.pickupPointId], references: [pickupPoints.id] }),
+  student: one(students, { fields: [transportAssignments.studentId], references: [students.id] }),
+  staff: one(staff, { fields: [transportAssignments.staffId], references: [staff.id] }),
+}));
+
+export const studentHousesRelations = relations(studentHouses, ({ one, many }) => ({
+  tenant: one(organizations, { fields: [studentHouses.tenantId], references: [organizations.id] }),
+  houseMaster: one(staff, { fields: [studentHouses.houseMasterId], references: [staff.id] }),
+  students: many(students),
+}));
+
+export const guardiansRelations = relations(guardians, ({ one, many }) => ({
+  tenant: one(organizations, { fields: [guardians.tenantId], references: [organizations.id] }),
+  studentGuardians: many(studentGuardians),
+}));
+
+export const studentsRelations = relations(students, ({ one, many }) => ({
+  tenant: one(organizations, { fields: [students.tenantId], references: [organizations.id] }),
+  user: one(users, { fields: [students.userId], references: [users.id] }),
+  admission: one(admissions, { fields: [students.admissionId], references: [admissions.id] }),
+  primaryGuardian: one(guardians, { fields: [students.primaryGuardianId], references: [guardians.id] }),
+  studentHouse: one(studentHouses, { fields: [students.studentHouseId], references: [studentHouses.id] }),
+  studentGuardians: many(studentGuardians),
+  documents: many(studentDocuments),
+}));
+
+export const studentGuardiansRelations = relations(studentGuardians, ({ one }) => ({
+  student: one(students, { fields: [studentGuardians.studentId], references: [students.id] }),
+  guardian: one(guardians, { fields: [studentGuardians.guardianId], references: [guardians.id] }),
+  tenant: one(organizations, { fields: [studentGuardians.tenantId], references: [organizations.id] }),
+}));
+
+export const studentDocumentsRelations = relations(studentDocuments, ({ one }) => ({
+  student: one(students, { fields: [studentDocuments.studentId], references: [students.id] }),
+  tenant: one(organizations, { fields: [studentDocuments.tenantId], references: [organizations.id] }),
+  verifiedByUser: one(users, { fields: [studentDocuments.verifiedBy], references: [users.id] }),
+}));
+
+export const admissionsRelations = relations(admissions, ({ one, many }) => ({
+  tenant: one(organizations, { fields: [admissions.tenantId], references: [organizations.id] }),
+  class: one(classes, { fields: [admissions.classId], references: [classes.id] }),
+  assignedToStaff: one(staff, { fields: [admissions.assignedToStaffId], references: [staff.id] }),
+  decidedByUser: one(users, { fields: [admissions.decidedBy], references: [users.id] }),
+  student: one(students, { fields: [admissions.studentId], references: [students.id] }),
+  statusHistory: many(admissionStatusHistory),
+}));
+
+export const admissionStatusHistoryRelations = relations(admissionStatusHistory, ({ one }) => ({
+  tenant: one(organizations, { fields: [admissionStatusHistory.tenantId], references: [organizations.id] }),
+  admission: one(admissions, { fields: [admissionStatusHistory.admissionId], references: [admissions.id] }),
+  changedByUser: one(users, { fields: [admissionStatusHistory.changedBy], references: [users.id] }),
 }));

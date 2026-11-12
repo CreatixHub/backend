@@ -39,7 +39,9 @@ const PUBLIC_USER_COLUMNS = {
 // Postgres' own SQLSTATE for a unique-constraint violation (what Prisma called "P2002").
 const UNIQUE_VIOLATION = "23505";
 function isUniqueViolation(e: unknown): boolean {
-  return typeof e === "object" && e !== null && "code" in e && (e as { code: unknown }).code === UNIQUE_VIOLATION;
+  if (typeof e !== "object" || e === null) return false;
+  const err = e as { code?: unknown; cause?: { code?: unknown } };
+  return err.code === UNIQUE_VIOLATION || err.cause?.code === UNIQUE_VIOLATION;
 }
 
 // Verified against when the email is unknown, so "unknown email" and "wrong password" take the same time.

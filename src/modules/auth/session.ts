@@ -18,7 +18,7 @@ export function signAccessToken(userId: bigint, tenantId: bigint | null): string
   return jwt.sign(
     { sub: String(userId), ...(tenantId ? { tid: String(tenantId) } : {}) },
     config.JWT_ACCESS_SECRET,
-    { algorithm: "HS256", expiresIn: config.JWT_ACCESS_TTL },
+    { algorithm: "HS256", expiresIn: config.JWT_ACCESS_TTL, jwtid: randomUUID() },
   );
 }
 

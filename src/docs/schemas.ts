@@ -313,6 +313,172 @@ export const AssetMaintenance = z
   })
   .openapi('AssetMaintenance');
 
+export const AdmissionStatusHistoryItem = z
+  .object({
+    id: id('802'),
+    admissionId: id('801'),
+    fromStatus: z.string().nullable(),
+    toStatus: z.string(),
+    note: z.string().nullable(),
+    changedBy: id('8').nullable(),
+    changedByName: z.string().nullable().optional(),
+    createdAt: z.string().datetime(),
+  })
+  .openapi('AdmissionStatusHistoryItem');
+
+export const Admission = z
+  .object({
+    id: id('801'),
+    applicationNo: z.string().openapi({ example: 'APP-2026-0001' }),
+    academicYearId: id('1'),
+    classId: id('301'),
+    firstName: z.string(),
+    lastName: z.string(),
+    dob: z.string(),
+    gender: z.string().nullable(),
+    email: z.string().nullable(),
+    phone: z.string().nullable(),
+    bloodGroup: z.string().nullable(),
+    religionId: id('1').nullable(),
+    socialCategory: z.string().nullable(),
+    fatherName: z.string().nullable(),
+    fatherPhone: z.string().nullable(),
+    fatherEmail: z.string().nullable(),
+    fatherOccupation: z.string().nullable(),
+    motherName: z.string().nullable(),
+    motherPhone: z.string().nullable(),
+    motherEmail: z.string().nullable(),
+    motherOccupation: z.string().nullable(),
+    guardianName: z.string(),
+    guardianPhone: z.string(),
+    guardianEmail: z.string().nullable(),
+    previousSchool: z.string().nullable(),
+    previousClass: z.string().nullable(),
+    addressLine1: z.string().nullable(),
+    addressLine2: z.string().nullable(),
+    cityId: id('1').nullable(),
+    postalCode: z.string().nullable(),
+    status: z.enum(['enquiry', 'applied', 'document_review', 'shortlisted', 'waitlisted', 'offered', 'accepted', 'rejected', 'withdrawn']),
+    appliedOn: z.string(),
+    acknowledgedAt: z.string().datetime().nullable(),
+    decisionOn: z.string().nullable(),
+    decidedBy: id('8').nullable(),
+    decisionNotes: z.string().nullable(),
+    rejectionReason: z.string().nullable(),
+    waitlistPosition: z.number().int().nullable(),
+    assignedToStaffId: id('101').nullable(),
+    needsTransport: z.boolean(),
+    needsHostel: z.boolean(),
+    applicationFee: z.string().nullable(),
+    feePaid: z.boolean(),
+    feePaidOn: z.string().nullable(),
+    feePaymentMethod: z.string().nullable(),
+    source: z.enum(['walk_in', 'website', 'referral', 'agent', 'event', 'other']),
+    studentId: id('901').nullable(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('Admission');
+
+export const StudentHouse = z
+  .object({
+    id: id('905'),
+    name: z.string().openapi({ example: 'Sapphire House' }),
+    color: z.string().nullable().openapi({ example: '#2563EB' }),
+    motto: z.string().nullable(),
+    houseMasterId: id('101').nullable(),
+    isActive: z.boolean(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('StudentHouse');
+
+export const Guardian = z
+  .object({
+    id: id('902'),
+    fullName: z.string(),
+    relation: z.enum(['father', 'mother', 'guardian', 'other']),
+    phone: z.string(),
+    altPhone: z.string().nullable(),
+    email: z.string().nullable(),
+    occupation: z.string().nullable(),
+    annualIncome: z.string().nullable(),
+    addressLine1: z.string().nullable(),
+    addressLine2: z.string().nullable(),
+    cityId: id('1').nullable(),
+    postalCode: z.string().nullable(),
+    photoFileId: id('1').nullable(),
+    idProofType: z.string().nullable(),
+    idProofNo: z.string().nullable(),
+    isEmergencyContact: z.boolean(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('Guardian');
+
+export const StudentGuardian = Guardian.extend({
+  isPrimary: z.boolean(),
+  canPickUp: z.boolean(),
+  linkedAt: z.string().datetime(),
+}).openapi('StudentGuardian');
+
+export const StudentDocument = z
+  .object({
+    id: id('903'),
+    studentId: id('901'),
+    documentType: z.string(),
+    fileId: id('1'),
+    documentNo: z.string().nullable(),
+    issuedOn: z.string().nullable(),
+    expiresOn: z.string().nullable(),
+    verifiedStatus: z.enum(['pending', 'verified', 'rejected']),
+    verifiedBy: id('8').nullable(),
+    verifiedAt: z.string().datetime().nullable(),
+    remarks: z.string().nullable(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('StudentDocument');
+
+export const Student = z
+  .object({
+    id: id('901'),
+    userId: id('8').nullable(),
+    admissionId: id('801').nullable(),
+    admissionNo: z.string().openapi({ example: 'STU-2026-0001' }),
+    firstName: z.string(),
+    lastName: z.string(),
+    fullName: z.string().nullable(),
+    dob: z.string(),
+    gender: z.string().nullable(),
+    bloodGroup: z.string().nullable(),
+    religionId: id('1').nullable(),
+    socialCategory: z.string().nullable(),
+    motherTongueId: id('1').nullable(),
+    photoFileId: id('1').nullable(),
+    fatherName: z.string().nullable(),
+    fatherPhone: z.string().nullable(),
+    fatherEmail: z.string().nullable(),
+    fatherOccupation: z.string().nullable(),
+    motherName: z.string().nullable(),
+    motherPhone: z.string().nullable(),
+    motherEmail: z.string().nullable(),
+    motherOccupation: z.string().nullable(),
+    primaryGuardianId: id('902').nullable(),
+    addressLine1: z.string().nullable(),
+    addressLine2: z.string().nullable(),
+    cityId: id('1').nullable(),
+    postalCode: z.string().nullable(),
+    studentHouseId: id('905').nullable(),
+    status: z.enum(['active', 'inactive', 'alumni', 'transferred_out', 'expelled']),
+    admittedOn: z.string(),
+    leftOn: z.string().nullable(),
+    leftReason: z.string().nullable(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('Student');
+
 // { success: true, data, meta? } - the envelope the frontend's apiClient expects.
 export const envelope = <T extends z.ZodTypeAny>(name: string, data: T) =>
   z.object({ success: z.literal(true), data }).openapi(name);
