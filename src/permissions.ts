@@ -3,10 +3,14 @@
 
 export const ACTIONS = ['view', 'create', 'edit', 'delete', 'import', 'export', 'approve', 'print', 'download', 'manage'];
 
-// 8 modules from your frontend's Roles & Permissions screen + 3 backend modules = 11 x 10 actions = 110 permissions.
+// 10 original modules (frontend Roles & Permissions screen + backend modules; 'teachers' is replaced by 'staff')
+// + 10 more new modules = 21 x 10 actions = 210 permissions.
 export const MODULES = [
-  'dashboard', 'students', 'admissions', 'teachers', 'academics', 'attendance', 'examinations', 'finance',
+  'dashboard', 'students', 'admissions', 'academics', 'attendance', 'examinations', 'finance',
   'organization', 'members', 'roles',
+  // new modules ('staff' replaces 'teachers' and covers teaching + non-teaching staff)
+  'staff', 'subjects', 'classes', 'timetable', 'homework', 'calendar',
+  'leaves', 'expenses', 'transport', 'assets', 'gatepass',
 ];
 
 export interface PermissionDef {
@@ -57,25 +61,63 @@ export const DEFAULT_ROLES: RoleDef[] = [
       'attendance.view', 'attendance.create', 'attendance.edit',
       'academics.view',
       'examinations.view', 'examinations.create', 'examinations.edit',
+      'subjects.view', 'classes.view', 'timetable.view',
+      'homework.view', 'homework.create', 'homework.edit', 'homework.delete',
+      'calendar.view',
+      'leaves.view', 'leaves.create',
     ],
   },
   {
     code: 'accountant',
     name: 'Accountant',
-    description: 'Manages fees and finance.',
-    permissions: [...dashboardOnly, 'students.view', ...all('finance')],
+    description: 'Manages fees, expenses and finance.',
+    permissions: [...dashboardOnly, 'students.view', ...all('finance'), ...all('expenses')],
   },
   {
     code: 'receptionist',
     name: 'Receptionist',
-    description: 'Handles enquiries and admissions.',
-    permissions: [...dashboardOnly, 'students.view', 'admissions.view', 'admissions.create', 'admissions.edit'],
+    description: 'Handles enquiries, admissions and front-desk gate passes.',
+    permissions: [
+      ...dashboardOnly, 'students.view',
+      'admissions.view', 'admissions.create', 'admissions.edit',
+      'gatepass.view', 'gatepass.create',
+    ],
   },
-  { code: 'student', name: 'Student', description: 'A student of the school.', permissions: dashboardOnly },
-  { code: 'parent', name: 'Parent', description: 'A parent or guardian.', permissions: dashboardOnly },
+  {
+    code: 'student',
+    name: 'Student',
+    description: 'A student of the school.',
+    permissions: [
+      ...dashboardOnly,
+      'homework.view', 'attendance.view',
+      'leaves.view', 'leaves.create',
+      'gatepass.create',
+    ],
+  },
+  {
+    code: 'parent',
+    name: 'Parent',
+    description: 'A parent or guardian.',
+    permissions: [
+      ...dashboardOnly,
+      'homework.view', 'attendance.view',
+      'leaves.create',
+      'finance.view',
+    ],
+  },
   { code: 'librarian', name: 'Librarian', description: 'Runs the library.', permissions: dashboardOnly },
   { code: 'warden', name: 'Warden', description: 'Runs the hostel.', permissions: dashboardOnly },
-  { code: 'transport_manager', name: 'Transport manager', description: 'Runs school transport.', permissions: dashboardOnly },
+  {
+    code: 'transport_manager',
+    name: 'Transport manager',
+    description: 'Runs school transport.',
+    permissions: [...dashboardOnly, ...all('transport')],
+  },
   { code: 'nurse', name: 'Nurse', description: 'School health room.', permissions: dashboardOnly },
-  { code: 'security', name: 'Security', description: 'Gate and campus security.', permissions: dashboardOnly },
+  {
+    code: 'security',
+    name: 'Security',
+    description: 'Gate and campus security.',
+    permissions: [...dashboardOnly, ...all('gatepass'), 'attendance.view'],
+  },
 ];
