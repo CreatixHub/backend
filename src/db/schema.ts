@@ -6,6 +6,7 @@ import {
   boolean,
   date,
   index,
+  inet,
   integer,
   jsonb,
   numeric,
@@ -52,23 +53,41 @@ export const users = pgTable(
   "users",
   {
     id: idCol(),
-    email: text("email").notNull(),
-    fullName: text("full_name").notNull(),
-    passwordHash: text("password_hash").notNull(),
+    username: text("username"),
+    email: text("email"),
     phone: text("phone"),
+    fullName: text("full_name").notNull(),
+    passwordHash: text("password_hash"),
+    userType: text("user_type").notNull().default("staff"), // student | guardian | staff | admin | owner
+    status: text("status").notNull().default("active"), // active | invited | suspended | deleted
     avatarUrl: text("avatar_url"),
-    status: text("status").notNull().default("active"),
-    failedLoginCount: integer("failed_login_count").notNull().default(0),
-    lockedUntil: ts("locked_until"),
-    lastLoginAt: ts("last_login_at"),
-    passwordChangedAt: ts("password_changed_at"),
+    avatarFileId: plainBigint("avatar_file_id"), // files table not built yet
+    languageId: plainBigint("language_id"), // languages table not built yet
+    timezone: text("timezone"),
+    preferences: jsonb("preferences").$type<Record<string, unknown>>().notNull().default({}),
+    invitedAt: ts("invited_at"),
     emailVerifiedAt: ts("email_verified_at"),
+    phoneVerifiedAt: ts("phone_verified_at"),
+    lastLoginAt: ts("last_login_at"),
+    lastLoginIp: inet("last_login_ip"),
+    failedLoginCount: smallint("failed_login_count").notNull().default(0),
+    lockedUntil: ts("locked_until"),
+    passwordChangedAt: ts("password_changed_at"),
+    mustChangePassword: boolean("must_change_password").notNull().default(false),
+    mfaEnabled: boolean("mfa_enabled").notNull().default(false),
+    deletedBy: plainBigint("deleted_by").references((): AnyPgColumn => users.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
     deletedAt: ts("deleted_at"),
     version: integer("version").notNull().default(1),
   },
-  (t) => [uniqueIndex("users_email_key").on(t.email)],
+  (t) => [
+    uniqueIndex("users_username_key").on(t.username),
+    uniqueIndex("users_email_key").on(t.email),
+  ],
 );
 
 export const memberships = pgTable(
@@ -1215,7 +1234,12 @@ export const organizationsRelations = relations(organizations, ({ many }) => ({
   auditLogs: many(auditLog),
 }));
 
-export const usersRelations = relations(users, ({ many }) => ({
+export const usersRelations = relations(users, ({ one, many }) => ({
+  deletedByUser: one(users, {
+    fields: [users.deletedBy],
+    references: [users.id],
+    relationName: "userDeletedBy",
+  }),
   memberships: many(memberships),
   refreshTokens: many(refreshTokens),
 }));

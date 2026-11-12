@@ -11,10 +11,19 @@ import type { TenantContext } from '../lib/tenant';
 // WHO is calling: a person (not a person-in-a-school; req.tenant adds that).
 export interface AuthUser {
   id: bigint;
-  email: string;
+  username: string | null;
+  email: string | null;
   fullName: string;
   phone: string | null;
   avatarUrl: string | null;
+  avatarFileId: bigint | null;
+  languageId: bigint | null;
+  timezone: string | null;
+  preferences: Record<string, unknown>;
+  userType: string;
+  status: string;
+  mustChangePassword: boolean;
+  mfaEnabled: boolean;
 }
 
 // Use inside route handlers: the signed-in person, or 401.
@@ -49,7 +58,22 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
 
   // 3. load the person on EVERY request, so disabling an account takes effect immediately
   const [user] = await db
-    .select({ id: users.id, email: users.email, fullName: users.fullName, phone: users.phone, avatarUrl: users.avatarUrl })
+    .select({
+      id: users.id,
+      username: users.username,
+      email: users.email,
+      fullName: users.fullName,
+      phone: users.phone,
+      avatarUrl: users.avatarUrl,
+      avatarFileId: users.avatarFileId,
+      languageId: users.languageId,
+      timezone: users.timezone,
+      preferences: users.preferences,
+      userType: users.userType,
+      status: users.status,
+      mustChangePassword: users.mustChangePassword,
+      mfaEnabled: users.mfaEnabled,
+    })
     .from(users)
     .where(and(eq(users.id, BigInt(sub)), eq(users.status, 'active'), isNull(users.deletedAt)))
     .limit(1);

@@ -72,17 +72,41 @@ export function toFrontendRole(roleCodes: string[]): string | null {
 
 // The user JSON your frontend's auth.http.ts reads.
 export function toFrontendUser(
-  user: { id: bigint; fullName: string; email: string; phone: string | null; avatarUrl: string | null },
+  user: {
+    id: bigint;
+    username: string | null;
+    fullName: string;
+    email: string | null;
+    phone: string | null;
+    avatarUrl: string | null;
+    avatarFileId: bigint | null;
+    languageId: bigint | null;
+    timezone: string | null;
+    preferences: Record<string, unknown>;
+    userType: string;
+    status: string;
+    mustChangePassword: boolean;
+    mfaEnabled: boolean;
+  },
   tenant: TenantContext | null,
 ) {
   return {
     id: user.id,
+    username: user.username,
     name: user.fullName,
     email: user.email,
     role: tenant ? toFrontendRole(tenant.roles) : null,
+    userType: user.userType,
+    status: user.status,
     permissions: !tenant ? [] : tenant.permissions.has("*") ? ["*"] : [...tenant.permissions].sort(),
     avatar: user.avatarUrl,
+    avatarFileId: user.avatarFileId,
     phone: user.phone,
+    languageId: user.languageId,
+    timezone: user.timezone,
+    preferences: user.preferences,
+    mustChangePassword: user.mustChangePassword,
+    mfaEnabled: user.mfaEnabled,
     organization: tenant ? { id: tenant.id, slug: tenant.slug, name: tenant.name, roles: tenant.roles } : null,
   };
 }

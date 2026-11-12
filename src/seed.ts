@@ -48,6 +48,7 @@ async function seedDemoAccount() {
       .values({
         email: DEMO_EMAIL,
         fullName: 'Demo Admin',
+        userType: 'owner',
         passwordHash: await argon2.hash(DEMO_PASSWORD),
         passwordChangedAt: new Date(),
         emailVerifiedAt: new Date(),

@@ -34,15 +34,24 @@ const FRONTEND_ROLES = [
 export const ApiUser = z
   .object({
     id: id('8'),
+    username: z.string().nullable().openapi({ example: 'alice.owner' }),
     name: z.string().openapi({ example: 'Alice Owner' }),
-    email: z.string().openapi({ example: 'alice@example.test' }),
+    email: z.string().nullable().openapi({ example: 'alice@example.test' }),
     role: z
       .enum(FRONTEND_ROLES)
       .nullable()
       .openapi({ description: 'One role for the frontend, derived from the roles in the active school. null while there is no school.' }),
+    userType: z.enum(['student', 'guardian', 'staff', 'admin', 'owner']),
+    status: z.enum(['active', 'invited', 'suspended', 'deleted']),
     permissions: z.array(z.string()).openapi({ example: ['*'], description: '["*"] = every permission (owners). [] while there is no school.' }),
     avatar: z.string().nullable(),
+    avatarFileId: id('1').nullable(),
     phone: z.string().nullable(),
+    languageId: id('1').nullable(),
+    timezone: z.string().nullable(),
+    preferences: z.record(z.string(), z.unknown()),
+    mustChangePassword: z.boolean(),
+    mfaEnabled: z.boolean(),
     organization: z
       .object({ id: id('7'), slug: z.string(), name: z.string(), roles: z.array(z.string()) })
       .nullable()
@@ -82,9 +91,14 @@ export const Member = z
   .object({
     id: id('12').openapi({ description: 'The MEMBERSHIP id. Use it in /members/{id}.' }),
     userId: id('13'),
+    username: z.string().nullable(),
     name: z.string().openapi({ example: 'Bob Teacher' }),
-    email: z.string().openapi({ example: 'bob@example.test' }),
+    email: z.string().nullable().openapi({ example: 'bob@example.test' }),
     phone: z.string().nullable(),
+    userType: z.enum(['student', 'guardian', 'staff', 'admin', 'owner']),
+    userStatus: z.enum(['active', 'invited', 'suspended', 'deleted']),
+    invitedAt: z.string().datetime().nullable(),
+    lastLoginAt: z.string().datetime().nullable(),
     status: z.enum(['active', 'suspended']),
     roles: z.array(z.string()).openapi({ example: ['teacher'] }),
     createdAt: z.string().datetime(),

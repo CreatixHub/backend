@@ -3,6 +3,7 @@ import { and, asc, count, eq, inArray, ilike, ne, or } from 'drizzle-orm';
 import { db } from '../../db';
 import { membershipRoles, memberships, roles, users } from '../../db/schema';
 import { HttpError } from '../../lib/errors';
+import { isForeignKeyViolation, isUniqueViolation, pgConstraint } from '../../lib/pgErrors';
 import type { TenantContext } from '../../lib/tenant';
 import type { AuthUser } from '../../middleware/authenticate';
 import type { AddMemberInput, ListMembersInput, UpdateMemberInput } from './members.schemas';
@@ -11,17 +12,17 @@ import type { AddMemberInput, ListMembersInput, UpdateMemberInput } from './memb
 // RULES for every function: every query has tenantId = tenant.id (from the VERIFIED token), and roles are
 // looked up INSIDE this school only.
 
-const UNIQUE_VIOLATION = '23505';
-function isUniqueViolation(e: unknown): boolean {
-  return typeof e === 'object' && e !== null && 'code' in e && (e as { code: unknown }).code === UNIQUE_VIOLATION;
-}
-
 interface MemberRow {
   id: bigint;
   userId: bigint;
+  username: string | null;
   fullName: string;
-  email: string;
+  email: string | null;
   phone: string | null;
+  userType: string;
+  userStatus: string;
+  invitedAt: Date | null;
+  lastLoginAt: Date | null;
   status: string;
   createdAt: Date;
   roleCodes: string[];
@@ -30,13 +31,26 @@ interface MemberRow {
 const toMember = (m: MemberRow) => ({
   id: m.id,
   userId: m.userId,
+  username: m.username,
   name: m.fullName,
   email: m.email,
   phone: m.phone,
+  userType: m.userType,
+  userStatus: m.userStatus,
+  invitedAt: m.invitedAt,
+  lastLoginAt: m.lastLoginAt,
   status: m.status,
   roles: m.roleCodes,
   createdAt: m.createdAt,
 });
+
+function inferUserType(roleCodes: string[]): 'owner' | 'admin' | 'student' | 'guardian' | 'staff' {
+  if (roleCodes.includes('owner')) return 'owner';
+  if (roleCodes.includes('admin')) return 'admin';
+  if (roleCodes.includes('student')) return 'student';
+  if (roleCodes.includes('parent')) return 'guardian';
+  return 'staff';
+}
 
 // Fetches a batch of membership rows (with user info and role codes) by membership id.
 async function loadMembers(membershipIds: bigint[]): Promise<Map<bigint, MemberRow>> {
@@ -45,9 +59,14 @@ async function loadMembers(membershipIds: bigint[]): Promise<Map<bigint, MemberR
     .select({
       id: memberships.id,
       userId: memberships.userId,
+      username: users.username,
       fullName: users.fullName,
       email: users.email,
       phone: users.phone,
+      userType: users.userType,
+      userStatus: users.status,
+      invitedAt: users.invitedAt,
+      lastLoginAt: users.lastLoginAt,
       status: memberships.status,
       createdAt: memberships.createdAt,
     })
@@ -99,7 +118,7 @@ export async function listMembers(
   const where = and(
     eq(memberships.tenantId, tenant.id),
     q.q
-      ? or(ilike(users.fullName, `%${q.q}%`), ilike(users.email, `%${q.q}%`))
+      ? or(ilike(users.fullName, `%${q.q}%`), ilike(users.email, `%${q.q}%`), ilike(users.username, `%${q.q}%`))
       : undefined,
   );
 
@@ -151,17 +170,32 @@ export async function addMember(tenant: TenantContext, _actor: AuthUser, input: 
       return toMember((await loadMember(membership.id))!);
     }
 
-    // No account yet: the admin creates it, so name and a temporary password are required.
+    // No account yet: the admin creates it (either directly with a password or as an invited account).
     const errors: { field: string; message: string }[] = [];
     if (!input.fullName) errors.push({ field: 'fullName', message: 'Required for a new account' });
-    if (!input.password) errors.push({ field: 'password', message: 'Required for a new account' });
+    if (!input.invite && !input.password) errors.push({ field: 'password', message: 'Required for a new account' });
     if (errors.length) throw new HttpError(400, 'Validation failed', errors);
 
-    const passwordHash = await argon2.hash(input.password!);
+    const passwordHash = input.password ? await argon2.hash(input.password) : null;
+    const isInvited = Boolean(input.invite && !passwordHash);
+    const userType = input.userType ?? inferUserType(roleRows.map((r) => r.code));
     const membershipId = await db.transaction(async (tx) => {
       const [user] = await tx
         .insert(users)
-        .values({ email: input.email, fullName: input.fullName!, passwordHash, passwordChangedAt: new Date() })
+        .values({
+          email: input.email,
+          username: input.username ?? null,
+          phone: input.phone ?? null,
+          fullName: input.fullName!,
+          passwordHash,
+          userType,
+          status: isInvited ? 'invited' : 'active',
+          invitedAt: input.invite ? new Date() : null,
+          timezone: input.timezone ?? null,
+          languageId: input.languageId ?? null,
+          mustChangePassword: input.mustChangePassword ?? isInvited,
+          passwordChangedAt: passwordHash ? new Date() : null,
+        })
         .returning({ id: users.id });
       const [membership] = await tx
         .insert(memberships)
@@ -175,7 +209,13 @@ export async function addMember(tenant: TenantContext, _actor: AuthUser, input: 
     return toMember((await loadMember(membershipId))!);
   } catch (e) {
     if (isUniqueViolation(e)) {
+      if (pgConstraint(e) === 'users_username_key') {
+        throw new HttpError(409, 'An account with this username already exists');
+      }
       throw new HttpError(409, 'This person is already a member of this school');
+    }
+    if (isForeignKeyViolation(e)) {
+      throw new HttpError(400, 'Invalid reference ID provided');
     }
     throw e;
   }
