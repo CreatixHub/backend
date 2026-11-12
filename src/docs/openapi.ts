@@ -4,8 +4,36 @@ import { loginSchema, signupSchema, switchOrganizationSchema } from '../modules/
 import { addMemberSchema, listMembersSchema, updateMemberSchema } from '../modules/members/members.schemas';
 import { createOrganizationSchema, updateOrganizationSchema } from '../modules/organizations/organizations.schemas';
 import { createRoleSchema, updateRoleSchema } from '../modules/roles/roles.schemas';
+import { createStaffSchema, listStaffSchema, updateStaffSchema } from '../modules/staff/staff.schemas';
+import { createSubjectSchema, listSubjectsSchema, updateSubjectSchema } from '../modules/subjects/subjects.schemas';
 import {
-  CreatedOrganization, CurrentOrganization, ErrorResponse, Health, Me, Member, Permission, Role, SchoolSummary, SessionData,
+  createClassSchema, createSectionSchema, listClassesSchema, listSectionsSchema, setClassSubjectsSchema,
+  updateClassSchema, updateSectionSchema,
+} from '../modules/classes/classes.schemas';
+import {
+  createEntrySchema, createSectionTeacherSchema, createTimeSlotSchema, listEntriesSchema, listSectionTeachersSchema,
+  listTimeSlotsSchema, updateEntrySchema, updateSectionTeacherSchema, updateTimeSlotSchema,
+} from '../modules/timetable/timetable.schemas';
+import {
+  createHomeworkSchema, gradeSubmissionSchema, listHomeworkSchema, listSubmissionsSchema, recordSubmissionSchema,
+  updateHomeworkSchema,
+} from '../modules/homework/homework.schemas';
+import {
+  createAssignmentSchema, createDriverSchema, createPickupPointSchema, createRouteSchema, createScheduleSchema,
+  createVehicleSchema, listAssignmentsSchema, listDriversSchema, listPickupPointsSchema, listRoutesSchema,
+  listSchedulesSchema, listVehiclesSchema, updateAssignmentSchema, updateDriverSchema, updatePickupPointSchema,
+  updateRouteSchema, updateScheduleSchema, updateVehicleSchema,
+} from '../modules/transport/transport.schemas';
+import {
+  createAllocationSchema, createAssetSchema, createCategorySchema, createMaintenanceSchema, disposeAssetSchema,
+  listAllocationsSchema, listAssetsSchema, listMaintenanceSchema, returnAllocationSchema, updateAllocationSchema,
+  updateAssetSchema, updateCategorySchema, updateMaintenanceSchema,
+} from '../modules/assets/assets.schemas';
+import {
+  Asset, AssetAllocation, AssetCategory, AssetMaintenance, ClassRow, ClassSubject, CreatedOrganization,
+  CurrentOrganization, Driver, ErrorResponse, Health, Homework, HomeworkSubmission, Me, Member, Permission,
+  PickupPoint, Role, RouteSchedule, SchoolSummary, Section, SectionTeacher, SessionData, Staff, Subject,
+  TimeSlot, TimetableEntry, TransportAssignment, TransportRoute, Vehicle,
   envelope, pagedEnvelope,
 } from './schemas';
 
@@ -53,6 +81,92 @@ const SET_COOKIE = {
 const needs = (code: string) => `\n\n**Requires permission:** \`${code}\` in the school the token carries.`;
 const bearer = [{ bearerAuth: [] }];
 const idParam = (what: string) => z.object({ id: z.string().regex(/^\d{1,18}$/).openapi({ example: '12', description: what }) });
+
+// Registers the standard list/get-one/create/update[/delete] shape for one resource in one call.
+// Modules 7-13 (Staff through Assets) are almost entirely this shape; the few genuinely different endpoints
+// (the classes/subjects mapping, homework publish/close/submissions/grade, asset dispose, allocation return)
+// are registered by hand below, the same way Members/Roles always were.
+function crud(opts: {
+  tag: string;
+  base: string; // '/subjects' (no leading /api - servers already has that)
+  module: string; // permission prefix, e.g. 'subjects'
+  resourceName: string; // singular, lowercase, for summaries: 'subject'
+  idDesc: string; // what the :id is, for idParam()
+  item: z.ZodTypeAny;
+  listQuery?: z.ZodTypeAny;
+  paged?: boolean;
+  listDescription?: string;
+  withGetOne?: boolean;
+  createBody?: z.ZodTypeAny;
+  createExample?: unknown;
+  createDescription?: string;
+  conflict?: { description: string; message: string }; // 409 on create, e.g. a duplicate code
+  updateBody?: z.ZodTypeAny;
+  updateExample?: unknown;
+  updateDescription?: string;
+  withDelete?: boolean;
+  deleteSummary?: string;
+  deleteDescription?: string;
+}) {
+  const { tag, base, module, resourceName, idDesc, item } = opts;
+  const notFound = fail(`No such ${resourceName} in this school.`, `${resourceName[0].toUpperCase()}${resourceName.slice(1)} not found`);
+
+  registry.registerPath({
+    method: 'get', path: base, tags: [tag], summary: `List ${resourceName}s`,
+    description: (opts.listDescription ?? '') + needs(`${module}.view`),
+    security: bearer,
+    // zod-to-openapi's RouteParameter type is narrower than ZodTypeAny; this helper takes any zod object,
+    // which registerPath() itself validates fine at doc-build time regardless of this cast.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ...(opts.listQuery ? { request: { query: opts.listQuery as any } } : {}),
+    responses: {
+      200: reply(`${opts.paged ? 'One page of' : 'Every'} ${resourceName}.`, opts.paged ? pagedEnvelope(`${tag}ListResponse`, item) : envelope(`${tag}ListResponse`, z.array(item))),
+      400: E.validation, 401: E.unauthorized, 403: E.noPermission,
+    },
+  });
+
+  if (opts.withGetOne) {
+    registry.registerPath({
+      method: 'get', path: `${base}/{id}`, tags: [tag], summary: `Get one ${resourceName}`,
+      description: needs(`${module}.view`), security: bearer, request: { params: idParam(idDesc) },
+      responses: { 200: reply(`The ${resourceName}.`, envelope(`${tag}Response`, item)), 401: E.unauthorized, 403: E.noPermission, 404: notFound },
+    });
+  }
+
+  if (opts.createBody) {
+    registry.registerPath({
+      method: 'post', path: base, tags: [tag], summary: `Create a ${resourceName}`,
+      description: (opts.createDescription ?? '') + needs(`${module}.create`), security: bearer,
+      request: { body: { required: true, ...json(opts.createBody, opts.createExample) } },
+      responses: {
+        201: reply(`${resourceName[0].toUpperCase()}${resourceName.slice(1)} created.`, envelope(`Create${tag}Response`, item)),
+        400: E.validation, 401: E.unauthorized, 403: E.noPermission,
+        ...(opts.conflict ? { 409: fail(opts.conflict.description, opts.conflict.message) } : {}),
+      },
+    });
+  }
+
+  if (opts.updateBody) {
+    registry.registerPath({
+      method: 'patch', path: `${base}/{id}`, tags: [tag], summary: `Edit a ${resourceName}`,
+      description: (opts.updateDescription ?? '') + needs(`${module}.edit`), security: bearer,
+      request: { params: idParam(idDesc), body: { required: true, ...json(opts.updateBody, opts.updateExample) } },
+      responses: {
+        200: reply(`The updated ${resourceName}.`, envelope(`Update${tag}Response`, item)),
+        400: E.validation, 401: E.unauthorized, 403: E.noPermission, 404: notFound,
+      },
+    });
+  }
+
+  if (opts.withDelete) {
+    registry.registerPath({
+      method: 'delete', path: `${base}/{id}`, tags: [tag], summary: opts.deleteSummary ?? `Remove a ${resourceName}`,
+      description: (opts.deleteDescription ?? '') + needs(`${module}.delete`), security: bearer,
+      request: { params: idParam(idDesc) },
+      responses: { 204: { description: 'Done. No body.' }, 401: E.unauthorized, 403: E.noPermission, 404: notFound },
+    });
+  }
+}
 
 // ---------------------------------------------------------------- Health
 registry.registerPath({
@@ -262,9 +376,262 @@ registry.registerPath({
 
 registry.registerPath({
   method: 'get', path: '/permissions', tags: ['Roles and permissions'], summary: 'The permission catalogue',
-  description: `All 110 permission codes (11 modules x 10 actions), flat and sorted. The same for every school.${needs('roles.view')}`,
+  description: `All 210 permission codes (21 modules x 10 actions), flat and sorted. The same for every school.${needs('roles.view')}`,
   security: bearer,
   responses: { 200: reply('Every permission code.', envelope('PermissionListResponse', z.array(Permission))), 401: E.unauthorized, 403: E.noPermission },
+});
+
+// ---------------------------------------------------------------- Staff
+crud({
+  tag: 'Staff', base: '/staff', module: 'staff', resourceName: 'staff member', idDesc: 'The staff id from GET /staff',
+  item: Staff, listQuery: listStaffSchema, paged: true,
+  listDescription: 'Paged. `q` searches name, employee number and email.',
+  withGetOne: true,
+  createBody: createStaffSchema, createDescription: 'National ID, PAN and bank account are encrypted at rest and never returned - the response only says whether one is on file.',
+  createExample: { firstName: 'Priya', lastName: 'Nair', staffType: 'teaching', employmentType: 'full_time', joinedOn: '2026-06-01' },
+  conflict: { description: 'That employee number or login account is already used in this school.', message: 'That employee number is already used in this school' },
+  updateBody: updateStaffSchema, updateExample: { phone: '9876543210' },
+  withDelete: true, deleteSummary: 'Retire a staff member', deleteDescription: 'Soft delete: the row stays (history, payroll later), it just disappears from every list and lookup.',
+});
+
+// ---------------------------------------------------------------- Subjects
+crud({
+  tag: 'Subjects', base: '/subjects', module: 'subjects', resourceName: 'subject', idDesc: 'The subject id from GET /subjects',
+  item: Subject, listQuery: listSubjectsSchema, paged: true, listDescription: 'Paged. `q` searches code and name.',
+  withGetOne: true,
+  createBody: createSubjectSchema, createExample: { code: 'MATH10', name: 'Mathematics', subjectType: 'core' },
+  conflict: { description: 'That code is already used in this school.', message: 'A subject with this code already exists' },
+  updateBody: updateSubjectSchema, updateExample: { name: 'Mathematics (Advanced)' },
+  withDelete: true,
+});
+
+// ---------------------------------------------------------------- Classes & Sections
+crud({
+  tag: 'Classes', base: '/classes', module: 'classes', resourceName: 'class', idDesc: 'The class id from GET /classes',
+  item: ClassRow, listQuery: listClassesSchema, paged: true, listDescription: 'Paged. `q` searches name and code.',
+  withGetOne: true,
+  createBody: createClassSchema, createExample: { gradeLevel: 10, name: 'Grade 10', code: 'G10' },
+  conflict: { description: 'That code is already used in this school.', message: 'A class with this code already exists' },
+  updateBody: updateClassSchema, updateExample: { stream: 'Science' },
+  withDelete: true,
+});
+
+registry.registerPath({
+  method: 'get', path: '/classes/{id}/subjects', tags: ['Classes'], summary: "A class's subjects",
+  description: `Each entry carries the exam/internal marks split and whether it is elective.${needs('classes.view')}`,
+  security: bearer, request: { params: idParam('The class id from GET /classes') },
+  responses: { 200: reply("The class's subjects.", envelope('ClassSubjectsResponse', z.array(ClassSubject))), 401: E.unauthorized, 403: E.noPermission, 404: fail('No such class in this school.', 'Class not found') },
+});
+
+registry.registerPath({
+  method: 'put', path: '/classes/{id}/subjects', tags: ['Classes'], summary: "Replace a class's subjects",
+  description: `Sends the WHOLE list - anything left out is removed from the class. A subject may only appear once.${needs('classes.edit')}`,
+  security: bearer,
+  request: {
+    params: idParam('The class id from GET /classes'),
+    body: { required: true, ...json(setClassSubjectsSchema, { subjects: [{ subjectId: '201', isElective: false, examMarks: 80, internalMarks: 20 }] }) },
+  },
+  responses: { 200: reply("The class's updated subjects.", envelope('SetClassSubjectsResponse', z.array(ClassSubject))), 400: E.validation, 401: E.unauthorized, 403: E.noPermission, 404: fail('No such class in this school.', 'Class not found') },
+});
+
+crud({
+  tag: 'Classes', base: '/sections', module: 'classes', resourceName: 'section', idDesc: 'The section id from GET /sections',
+  item: Section, listQuery: listSectionsSchema, paged: true,
+  withGetOne: true,
+  createBody: createSectionSchema, createExample: { classId: '301', name: 'A', capacity: 40 },
+  updateBody: updateSectionSchema, updateExample: { capacity: 45 },
+  withDelete: true,
+});
+
+// ---------------------------------------------------------------- Timetable (time slots, section teachers, entries)
+crud({
+  tag: 'Timetable', base: '/time-slots', module: 'timetable', resourceName: 'time slot', idDesc: 'The time slot id',
+  item: TimeSlot, listQuery: listTimeSlotsSchema,
+  createBody: createTimeSlotSchema, createExample: { name: 'Period 1', sequence: 1, startsAt: '09:00', endsAt: '09:40' },
+  updateBody: updateTimeSlotSchema, updateExample: { endsAt: '09:45' },
+  withDelete: true,
+});
+
+crud({
+  tag: 'Timetable', base: '/section-teachers', module: 'timetable', resourceName: 'section-teacher assignment', idDesc: 'The assignment id',
+  item: SectionTeacher, listQuery: listSectionTeachersSchema, paged: true,
+  listDescription: 'Which teacher takes a subject for a section in an academic year - the building block timetable entries and homework default to.',
+  createBody: createSectionTeacherSchema, createExample: { sectionId: '302', subjectId: '201', academicYearId: '1', teacherId: '101' },
+  updateBody: updateSectionTeacherSchema, updateExample: { teacherId: '102' },
+  withDelete: true,
+});
+
+crud({
+  tag: 'Timetable', base: '/timetable', module: 'timetable', resourceName: 'timetable entry', idDesc: 'The entry id',
+  item: TimetableEntry, listQuery: listEntriesSchema, paged: true,
+  listDescription: '`onDate` returns only entries in effect on that date. Creating a clashing entry (same section, teacher, classroom or break slot at the same time) is refused.',
+  createBody: createEntrySchema, createExample: { sectionId: '302', subjectId: '201', timeSlotId: '401', dayOfWeek: 1, academicYearId: '1', effectiveFrom: '2026-06-01' },
+  conflict: { description: 'The section, teacher, classroom or time slot already has an entry that overlaps this one.', message: 'That section, teacher or classroom already has an entry at this time' },
+  updateBody: updateEntrySchema, updateExample: { classroomId: '12' },
+  withDelete: true,
+});
+
+// ---------------------------------------------------------------- Homework (LMS basic)
+crud({
+  tag: 'Homework', base: '/homework', module: 'homework', resourceName: 'homework', idDesc: 'The homework id from GET /homework',
+  item: Homework, listQuery: listHomeworkSchema, paged: true,
+  listDescription: 'Paged. `q` searches the title. New homework starts as `draft`; see `/publish` and `/close` below.',
+  withGetOne: true,
+  createBody: createHomeworkSchema, createExample: { sectionId: '302', subjectId: '201', academicYearId: '1', title: 'Chapter 4 exercises', assignedOn: '2026-11-20', dueAt: '2026-11-27T17:00:00+05:30' },
+  updateBody: updateHomeworkSchema, updateExample: { description: 'Questions 1-10 only' },
+  withDelete: true, deleteDescription: 'Submissions are removed along with it.',
+});
+
+registry.registerPath({
+  method: 'post', path: '/homework/{id}/publish', tags: ['Homework'], summary: 'Publish a homework',
+  description: `Draft → published: students can now see it.${needs('homework.edit')}`,
+  security: bearer, request: { params: idParam('The homework id from GET /homework') },
+  responses: { 200: reply('The published homework.', envelope('PublishHomeworkResponse', Homework)), 401: E.unauthorized, 403: E.noPermission, 404: fail('No such homework in this school.', 'Homework not found') },
+});
+
+registry.registerPath({
+  method: 'post', path: '/homework/{id}/close', tags: ['Homework'], summary: 'Close a homework',
+  description: `Published → closed: no further submissions are accepted.${needs('homework.edit')}`,
+  security: bearer, request: { params: idParam('The homework id from GET /homework') },
+  responses: { 200: reply('The closed homework.', envelope('CloseHomeworkResponse', Homework)), 401: E.unauthorized, 403: E.noPermission, 404: fail('No such homework in this school.', 'Homework not found') },
+});
+
+registry.registerPath({
+  method: 'get', path: '/homework/{id}/submissions', tags: ['Homework'], summary: 'List a homework\'s submissions',
+  description: `Paged.${needs('homework.view')}`,
+  security: bearer, request: { params: idParam('The homework id from GET /homework'), query: listSubmissionsSchema },
+  responses: { 200: reply('One page of submissions.', pagedEnvelope('HomeworkSubmissionListResponse', HomeworkSubmission)), 400: E.validation, 401: E.unauthorized, 403: E.noPermission, 404: fail('No such homework in this school.', 'Homework not found') },
+});
+
+registry.registerPath({
+  method: 'post', path: '/homework/{id}/submissions', tags: ['Homework'], summary: 'Record a submission',
+  description: `Recorded as \`submitted\` or \`late\` depending on \`submittedAt\` versus the homework's \`dueAt\` (and whether late submissions are allowed at all).${needs('homework.edit')}`,
+  security: bearer,
+  request: { params: idParam('The homework id from GET /homework'), body: { required: true, ...json(recordSubmissionSchema, { enrollmentId: '55' }) } },
+  responses: { 201: reply('Submission recorded.', envelope('RecordSubmissionResponse', HomeworkSubmission)), 400: E.validation, 401: E.unauthorized, 403: E.noPermission, 404: fail('No such homework in this school.', 'Homework not found') },
+});
+
+registry.registerPath({
+  method: 'patch', path: '/homework-submissions/{id}/grade', tags: ['Homework'], summary: 'Grade a submission',
+  description: `Send \`resubmissionRequired: true\` instead of a score to send it back ungraded.${needs('homework.edit')}`,
+  security: bearer,
+  request: { params: idParam('The submission id from GET /homework/{id}/submissions'), body: { required: true, ...json(gradeSubmissionSchema, { score: 8.5 }) } },
+  responses: { 200: reply('The graded submission.', envelope('GradeSubmissionResponse', HomeworkSubmission)), 400: E.validation, 401: E.unauthorized, 403: E.noPermission, 404: fail('No such submission in this school.', 'Submission not found') },
+});
+
+// ---------------------------------------------------------------- Transport
+crud({
+  tag: 'Transport', base: '/vehicles', module: 'transport', resourceName: 'vehicle', idDesc: 'The vehicle id from GET /vehicles',
+  item: Vehicle, listQuery: listVehiclesSchema, paged: true,
+  listDescription: 'Paged. `q` searches registration number, make and model. `expiringWithinDays` flags insurance/fitness/permit/pollution documents due soon.',
+  withGetOne: true,
+  createBody: createVehicleSchema, createExample: { registrationNo: 'KA01AB1234', vehicleType: 'bus', seatingCapacity: 40 },
+  conflict: { description: 'That registration number is already used in this school.', message: 'That registration number is already used in this school' },
+  updateBody: updateVehicleSchema, updateExample: { odometerKm: 52000 },
+  withDelete: true, deleteSummary: 'Retire a vehicle', deleteDescription: 'Sets status to retired rather than deleting the row (it may still be on past schedules).',
+});
+
+crud({
+  tag: 'Transport', base: '/drivers', module: 'transport', resourceName: 'driver', idDesc: 'The driver id from GET /drivers',
+  item: Driver, listQuery: listDriversSchema, paged: true,
+  listDescription: 'Paged. `q` searches name, phone and licence number. `expiringWithinDays` flags a licence due soon.',
+  withGetOne: true,
+  createBody: createDriverSchema, createExample: { fullName: 'Ramesh Kumar', phone: '9876500000', licenseNo: 'KA0120230001234', licenseExpiry: '2028-01-01' },
+  conflict: { description: 'That licence number is already used in this school.', message: 'That licence number is already used in this school' },
+  updateBody: updateDriverSchema, updateExample: { phone: '9876511111' },
+  withDelete: true, deleteSummary: 'Deactivate a driver', deleteDescription: 'Sets status to inactive rather than deleting the row.',
+});
+
+crud({
+  tag: 'Transport', base: '/transport-routes', module: 'transport', resourceName: 'route', idDesc: 'The route id from GET /transport-routes',
+  item: TransportRoute, listQuery: listRoutesSchema, paged: true,
+  withGetOne: true,
+  createBody: createRouteSchema, createExample: { code: 'R1', name: 'North Loop' },
+  conflict: { description: 'That code is already used in this school.', message: 'A route with this code already exists' },
+  updateBody: updateRouteSchema, updateExample: { estimatedMinutes: 35 },
+  withDelete: true, deleteSummary: 'Deactivate a route', deleteDescription: 'Sets status to inactive rather than deleting the row.',
+});
+
+crud({
+  tag: 'Transport', base: '/pickup-points', module: 'transport', resourceName: 'pickup point', idDesc: 'The pickup point id',
+  item: PickupPoint, listQuery: listPickupPointsSchema,
+  createBody: createPickupPointSchema, createExample: { routeId: '603', name: 'Market Square', sequence: 1, monthlyFee: 500 },
+  updateBody: updatePickupPointSchema, updateExample: { landmark: 'Opposite the post office' },
+  withDelete: true,
+});
+
+crud({
+  tag: 'Transport', base: '/route-schedules', module: 'transport', resourceName: 'route schedule', idDesc: 'The schedule id',
+  item: RouteSchedule, listQuery: listSchedulesSchema, paged: true,
+  listDescription: '`activeOn` returns only schedules valid on that date.',
+  createBody: createScheduleSchema, createExample: { routeId: '603', vehicleId: '601', driverId: '602', shift: 'morning', operatingDays: [1, 2, 3, 4, 5], validFrom: '2026-06-01', validTo: '2027-03-31' },
+  updateBody: updateScheduleSchema, updateExample: { driverId: '604' },
+  withDelete: true,
+});
+
+crud({
+  tag: 'Transport', base: '/transport-assignments', module: 'transport', resourceName: 'transport assignment', idDesc: 'The assignment id',
+  item: TransportAssignment, listQuery: listAssignmentsSchema, paged: true,
+  listDescription: 'A student or staff assignment to a route and pickup point. To change the route, end this assignment and create a new one.',
+  createBody: createAssignmentSchema, createExample: { studentId: '901', academicYearId: '1', routeId: '603', pickupPointId: '604' },
+  updateBody: updateAssignmentSchema, updateExample: { pickupPointId: '605' },
+  withDelete: true, deleteSummary: 'End an assignment', deleteDescription: 'Sets status to ended rather than deleting the row.',
+});
+
+// ---------------------------------------------------------------- Assets
+crud({
+  tag: 'Assets', base: '/asset-categories', module: 'assets', resourceName: 'asset category', idDesc: 'The category id',
+  item: AssetCategory,
+  listDescription: 'Not paged - schools rarely have more than a few dozen categories.',
+  createBody: createCategorySchema, createExample: { name: 'Laptops', depreciationMethod: 'straight_line', usefulLifeYears: 4 },
+  updateBody: updateCategorySchema, updateExample: { usefulLifeYears: 5 },
+  withDelete: true,
+});
+
+crud({
+  tag: 'Assets', base: '/assets', module: 'assets', resourceName: 'asset', idDesc: 'The asset id from GET /assets',
+  item: Asset, listQuery: listAssetsSchema, paged: true,
+  listDescription: 'Paged. `q` searches tag, name and serial number. `warrantyExpiringWithinDays` flags warranties due soon.',
+  withGetOne: true,
+  createBody: createAssetSchema, createExample: { name: 'Dell Latitude 5440', categoryId: '701' },
+  conflict: { description: 'That asset tag is already used in this school.', message: 'That asset tag is already used in this school' },
+  updateBody: updateAssetSchema, updateExample: { condition: 'fair' },
+  withDelete: true, deleteSummary: "Dispose an asset (today, no details)",
+  deleteDescription: "Equivalent to `POST /assets/{id}/dispose` with no body: disposed today, no value or notes recorded.",
+});
+
+registry.registerPath({
+  method: 'post', path: '/assets/{id}/dispose', tags: ['Assets'], summary: 'Dispose an asset, with details',
+  description: `Status becomes \`disposed\`, which no other endpoint can set directly.${needs('assets.delete')}`,
+  security: bearer,
+  request: { params: idParam('The asset id from GET /assets'), body: { ...json(disposeAssetSchema, { disposalValue: 50 }) } },
+  responses: { 200: reply('The disposed asset.', envelope('DisposeAssetResponse', Asset)), 400: E.validation, 401: E.unauthorized, 403: E.noPermission, 404: fail('No such asset in this school.', 'Asset not found') },
+});
+
+crud({
+  tag: 'Assets', base: '/asset-allocations', module: 'assets', resourceName: 'asset allocation', idDesc: 'The allocation id',
+  item: AssetAllocation, listQuery: listAllocationsSchema, paged: true,
+  listDescription: 'Who currently holds what. `open: true` = not yet returned; `overdue: true` = not returned and past its expected return date. An asset can have at most one open allocation at a time.',
+  createBody: createAllocationSchema, createExample: { assetId: '702', staffId: '101' },
+  conflict: { description: 'This asset already has an open (not yet returned) allocation.', message: 'This asset is already allocated' },
+  updateBody: updateAllocationSchema, updateExample: { expectedReturnOn: '2027-01-15' },
+});
+
+registry.registerPath({
+  method: 'post', path: '/asset-allocations/{id}/return', tags: ['Assets'], summary: 'Return an allocated asset',
+  description: `Sets \`returnedOn\`, freeing the asset for its next allocation.${needs('assets.edit')}`,
+  security: bearer,
+  request: { params: idParam('The allocation id'), body: { required: true, ...json(returnAllocationSchema, { conditionIn: 'good' }) } },
+  responses: { 200: reply('The returned allocation.', envelope('ReturnAllocationResponse', AssetAllocation)), 400: E.validation, 401: E.unauthorized, 403: E.noPermission, 404: fail('No such allocation in this school.', 'Allocation not found') },
+});
+
+crud({
+  tag: 'Assets', base: '/asset-maintenance', module: 'assets', resourceName: 'maintenance record', idDesc: 'The maintenance record id',
+  item: AssetMaintenance, listQuery: listMaintenanceSchema, paged: true,
+  listDescription: '`dueWithinDays` flags scheduled maintenance that is overdue or coming up soon.',
+  createBody: createMaintenanceSchema, createExample: { assetId: '702', maintenanceType: 'repair', description: 'Screen replacement' },
+  updateBody: updateMaintenanceSchema, updateExample: { status: 'completed', completedOn: '2026-11-20' },
+  withDelete: true, deleteSummary: 'Cancel a maintenance record', deleteDescription: 'Sets status to cancelled rather than deleting the row.',
 });
 
 // ---------------------------------------------------------------- the document
@@ -296,6 +663,13 @@ export function buildOpenApiDocument() {
       { name: 'Organizations', description: 'Schools' },
       { name: 'Members', description: 'People in a school' },
       { name: 'Roles and permissions' },
+      { name: 'Staff', description: 'Teaching and non-teaching staff' },
+      { name: 'Subjects' },
+      { name: 'Classes', description: 'Classes, sections and which subjects each class takes' },
+      { name: 'Timetable', description: 'Time slots, section-teacher assignments, the weekly schedule' },
+      { name: 'Homework', description: 'Homework (basic LMS) and its submissions' },
+      { name: 'Transport', description: 'Vehicles, drivers, routes, pickup points, schedules, assignments' },
+      { name: 'Assets', description: 'Categories, assets, allocations, maintenance' },
     ],
   });
 }

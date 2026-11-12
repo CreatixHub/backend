@@ -113,6 +113,206 @@ export const Permission = z
 
 export const Health = z.object({ status: z.literal('ok') }).openapi('Health');
 
+// ---------------------------------------------------------------- Staff, Subjects, Classes & Sections,
+// Timetable, Homework, Transport, Assets (added 2026-11-12, alongside #41/#42). Each mirrors what its
+// service's toX()/toRow() helper actually returns: the full row minus tenantId (and deletedAt/deletedBy
+// where the module soft-deletes). Not every field carries an .openapi() example - only the ones worth
+// calling out; zod-to-openapi still documents every field's type either way.
+
+export const Staff = z
+  .object({
+    id: id('101'), employeeNo: z.string().openapi({ example: 'EMP-0001' }), userId: id('8').nullable(),
+    staffType: z.enum(['teaching', 'non_teaching']), employmentType: z.enum(['full_time', 'part_time', 'contract', 'visiting']),
+    departmentId: id('1').nullable(), designationId: id('1').nullable(), reportsToId: id('1').nullable(),
+    status: z.enum(['active', 'on_leave', 'suspended', 'left']),
+    firstName: z.string().nullable(), lastName: z.string().nullable(), fullName: z.string().nullable(),
+    dob: z.string().nullable(), gender: z.string().nullable(), bloodGroup: z.string().nullable(), maritalStatus: z.string().nullable(),
+    fatherName: z.string().nullable(), motherTongueId: id('1').nullable(),
+    email: z.string().nullable(), phone: z.string().nullable(), altPhone: z.string().nullable(),
+    addressLine1: z.string().nullable(), addressLine2: z.string().nullable(), cityId: id('1').nullable(), postalCode: z.string().nullable(),
+    permanentAddressSame: z.boolean(), permanentAddressLine1: z.string().nullable(), permanentAddressLine2: z.string().nullable(),
+    permanentCityId: id('1').nullable(), permanentPostalCode: z.string().nullable(),
+    joinedOn: z.string(), probationEndsOn: z.string().nullable(), confirmedOn: z.string().nullable(),
+    leftOn: z.string().nullable(), leftReason: z.string().nullable(),
+    qualification: z.string().nullable(), experienceYears: z.string().nullable().openapi({ description: 'Stored to 1 decimal place' }),
+    epfNo: z.string().nullable(), bankAccountName: z.string().nullable(), bankName: z.string().nullable(),
+    bankBranch: z.string().nullable(), bankIfsc: z.string().nullable(), bankMicr: z.string().nullable(),
+    hasNationalId: z.boolean().openapi({ description: 'true if a national ID is on file - the value itself is never returned' }),
+    hasPan: z.boolean().openapi({ description: 'true if a PAN is on file - the value itself is never returned' }),
+    hasBankAccount: z.boolean().openapi({ description: 'true if a bank account number is on file - the value itself is never returned' }),
+    emergencyContactName: z.string().nullable(), emergencyContactPhone: z.string().nullable(),
+    photoFileId: id('1').nullable(), socialLinks: z.record(z.string(), z.string()),
+    createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
+  })
+  .openapi('Staff');
+
+export const Subject = z
+  .object({
+    id: id('201'), code: z.string().openapi({ example: 'MATH10' }), name: z.string().openapi({ example: 'Mathematics' }),
+    subjectType: z.enum(['core', 'elective', 'co_curricular', 'language']), credits: z.string().nullable(),
+    color: z.string().nullable().openapi({ example: '#3B82F6' }), departmentId: id('1').nullable(),
+    status: z.enum(['active', 'inactive']), createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
+  })
+  .openapi('Subject');
+
+export const ClassRow = z
+  .object({
+    id: id('301'), gradeLevel: z.number().int().openapi({ example: 10 }), name: z.string().openapi({ example: 'Grade 10' }),
+    code: z.string(), stream: z.string().nullable(), category: z.string().nullable(), displayOrder: z.number().int(),
+    status: z.enum(['active', 'inactive']), createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
+  })
+  .openapi('Class');
+
+export const Section = z
+  .object({
+    id: id('302'), classId: id('301'), name: z.string().openapi({ example: 'A' }), capacity: z.number().int(),
+    defaultClassroomId: id('1').nullable(), shift: z.enum(['morning', 'afternoon', 'evening']), medium: z.string().nullable(),
+    status: z.enum(['active', 'inactive']), createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
+  })
+  .openapi('Section');
+
+export const ClassSubject = z
+  .object({
+    subjectId: id('201'), isElective: z.boolean(), periodsPerWeek: z.number().int().nullable(), displayOrder: z.number().int(),
+    examMarks: z.string(), internalMarks: z.string(), passMarks: z.string().nullable(),
+  })
+  .openapi('ClassSubject');
+
+export const TimeSlot = z
+  .object({
+    id: id('401'), name: z.string().openapi({ example: 'Period 1' }), sequence: z.number().int(),
+    startsAt: z.string().openapi({ example: '09:00' }), endsAt: z.string().openapi({ example: '09:40' }),
+    isBreak: z.boolean(), isActive: z.boolean(),
+  })
+  .openapi('TimeSlot');
+
+export const SectionTeacher = z
+  .object({
+    id: id('402'), sectionId: id('302'), subjectId: id('201'), academicYearId: id('1'), teacherId: id('101'),
+  })
+  .openapi('SectionTeacher');
+
+export const TimetableEntry = z
+  .object({
+    id: id('403'), sectionId: id('302'), subjectId: id('201'), teacherId: id('101'), timeSlotId: id('401'),
+    classroomId: id('1').nullable(), dayOfWeek: z.number().int().min(1).max(7).openapi({ description: '1 = Monday ... 7 = Sunday' }),
+    academicYearId: id('1'), effectiveFrom: z.string(), effectiveTo: z.string().nullable(),
+    status: z.enum(['active', 'inactive']),
+  })
+  .openapi('TimetableEntry');
+
+export const Homework = z
+  .object({
+    id: id('501'), sectionId: id('302'), subjectId: id('201'), teacherId: id('101'), academicYearId: id('1'),
+    title: z.string(), description: z.string().nullable(),
+    homeworkType: z.enum(['assignment', 'project', 'reading', 'practice']), priority: z.enum(['low', 'normal', 'high']),
+    durationMinutes: z.number().int().nullable(), assignedOn: z.string(), dueAt: z.string().datetime(),
+    maxMarks: z.string().nullable(), submissionRequired: z.boolean(), allowLate: z.boolean(),
+    latePenaltyPercent: z.string().nullable(), submissionType: z.enum(['text', 'file', 'both']),
+    status: z.enum(['draft', 'published', 'closed']),
+    createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
+  })
+  .openapi('Homework');
+
+export const HomeworkSubmission = z
+  .object({
+    id: id('502'), homeworkId: id('501'), enrollmentId: id('1'), submittedAt: z.string().datetime().nullable(),
+    textAnswer: z.string().nullable(), fileId: id('1').nullable(), lateReason: z.string().nullable(),
+    status: z.enum(['not_submitted', 'submitted', 'late', 'graded']),
+    score: z.string().nullable(), gradeLabel: z.string().nullable(), feedback: z.string().nullable(),
+    gradedAt: z.string().datetime().nullable(),
+  })
+  .openapi('HomeworkSubmission');
+
+export const Vehicle = z
+  .object({
+    id: id('601'), registrationNo: z.string().openapi({ example: 'KA01AB1234' }), vehicleType: z.enum(['bus', 'van', 'car']),
+    seatingCapacity: z.number().int(), insuranceExpiry: z.string().nullable(), fitnessExpiry: z.string().nullable(),
+    permitExpiry: z.string().nullable(), pollutionExpiry: z.string().nullable(), gpsDeviceId: z.string().nullable(),
+    chassisNo: z.string().nullable(), engineNo: z.string().nullable(), make: z.string().nullable(), model: z.string().nullable(),
+    manufactureYear: z.number().int().nullable(), odometerKm: z.number().int().nullable(),
+    status: z.enum(['active', 'maintenance', 'retired']),
+  })
+  .openapi('Vehicle');
+
+export const Driver = z
+  .object({
+    id: id('602'), staffId: id('101').nullable(), fullName: z.string(), phone: z.string(),
+    licenseNo: z.string(), licenseExpiry: z.string(), status: z.enum(['active', 'inactive']),
+  })
+  .openapi('Driver');
+
+export const TransportRoute = z
+  .object({
+    id: id('603'), code: z.string(), name: z.string(), startLocation: z.string().nullable(), endLocation: z.string().nullable(),
+    distanceKm: z.string().nullable(), estimatedMinutes: z.number().int().nullable(),
+    shift: z.enum(['morning', 'afternoon', 'both']), status: z.enum(['active', 'inactive']),
+  })
+  .openapi('TransportRoute');
+
+export const PickupPoint = z
+  .object({
+    id: id('604'), routeId: id('603'), name: z.string(), sequence: z.number().int(), landmark: z.string().nullable(),
+    latitude: z.string().nullable(), longitude: z.string().nullable(), pickupTime: z.string().nullable(),
+    dropTime: z.string().nullable(), monthlyFee: z.string(),
+  })
+  .openapi('PickupPoint');
+
+export const RouteSchedule = z
+  .object({
+    id: id('605'), routeId: id('603'), vehicleId: id('601'), driverId: id('602'), attendantStaffId: id('101').nullable(),
+    shift: z.enum(['morning', 'afternoon']), operatingDays: z.array(z.number().int().min(1).max(7)),
+    validFrom: z.string(), validTo: z.string(),
+  })
+  .openapi('RouteSchedule');
+
+export const TransportAssignment = z
+  .object({
+    id: id('606'), studentId: id('1').nullable(), staffId: id('101').nullable(), academicYearId: id('1'),
+    routeId: id('603'), pickupPointId: id('604'), direction: z.enum(['pickup', 'drop', 'both']),
+    monthlyFee: z.string(), status: z.enum(['active', 'ended']), endedOn: z.string().nullable(),
+  })
+  .openapi('TransportAssignment');
+
+export const AssetCategory = z
+  .object({
+    id: id('701'), name: z.string(), parentId: id('701').nullable(),
+    depreciationMethod: z.enum(['straight_line', 'declining_balance', 'none']), usefulLifeYears: z.number().int().nullable(),
+  })
+  .openapi('AssetCategory');
+
+export const Asset = z
+  .object({
+    id: id('702'), assetTag: z.string().openapi({ example: 'AST-0001' }), name: z.string(), categoryId: id('701'),
+    vendorId: id('1').nullable(), branchId: id('1').nullable().openapi({ description: 'null until the Branches module exists' }),
+    quantity: z.number().int(), serialNo: z.string().nullable(), model: z.string().nullable(),
+    purchaseDate: z.string().nullable(), purchaseCost: z.string().nullable(), warrantyUntil: z.string().nullable(),
+    salvageValue: z.string().nullable(), bookValue: z.string().nullable().openapi({ description: 'Computed from purchaseCost and the category\'s depreciation method' }),
+    locationClassroomId: id('1').nullable(),
+    status: z.enum(['in_use', 'in_store', 'under_repair', 'retired', 'disposed']), condition: z.enum(['new', 'good', 'fair', 'poor']),
+    disposedOn: z.string().nullable(), disposalValue: z.string().nullable(), notes: z.string().nullable(),
+    createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
+  })
+  .openapi('Asset');
+
+export const AssetAllocation = z
+  .object({
+    id: id('703'), assetId: id('702'), staffId: id('101').nullable(), studentId: id('1').nullable(), classroomId: id('1').nullable(),
+    allocatedOn: z.string(), expectedReturnOn: z.string().nullable(), returnedOn: z.string().nullable(),
+    conditionOut: z.enum(['new', 'good', 'fair', 'poor']).nullable(), conditionIn: z.enum(['new', 'good', 'fair', 'poor']).nullable(),
+    notes: z.string().nullable(),
+  })
+  .openapi('AssetAllocation');
+
+export const AssetMaintenance = z
+  .object({
+    id: id('704'), assetId: id('702'), maintenanceType: z.enum(['scheduled', 'repair', 'inspection']),
+    description: z.string().nullable(), reportedOn: z.string().nullable(), startedOn: z.string().nullable(), completedOn: z.string().nullable(),
+    cost: z.string().nullable(), labourCost: z.string().nullable(), partsCost: z.string().nullable(), vendorId: id('1').nullable(),
+    status: z.enum(['reported', 'in_progress', 'completed', 'cancelled']), nextDueOn: z.string().nullable(),
+  })
+  .openapi('AssetMaintenance');
+
 // { success: true, data, meta? } - the envelope the frontend's apiClient expects.
 export const envelope = <T extends z.ZodTypeAny>(name: string, data: T) =>
   z.object({ success: z.literal(true), data }).openapi(name);
