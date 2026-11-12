@@ -19,4 +19,6 @@ body.json
 bad.json
 bad2.json
 resp.json
-docs/
+
+# the top-level reference-material folder only (not any nested "docs" dir, e.g. src/docs/ is real app code)
+/docs/
