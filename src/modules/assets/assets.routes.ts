@@ -70,7 +70,7 @@ assetsRouter.delete('/:id', requirePermission('assets.delete'), async (req, res)
 export const assetAllocationsRouter = Router();
 
 assetAllocationsRouter.get('/', requirePermission('assets.view'), async (req, res) => {
-  const result = await svc.listAllocations(currentTenant(req), listAllocationsSchema.parse(req.query));
+  const result = await svc.listAllocations(currentTenant(req), currentUser(req), listAllocationsSchema.parse(req.query));
   ok(res, result.rows, result.meta);
 });
 assetAllocationsRouter.post('/', requirePermission('assets.create'), async (req, res) => {

@@ -34,15 +34,24 @@ const FRONTEND_ROLES = [
 export const ApiUser = z
   .object({
     id: id('8'),
+    username: z.string().nullable().openapi({ example: 'alice.owner' }),
     name: z.string().openapi({ example: 'Alice Owner' }),
-    email: z.string().openapi({ example: 'alice@example.test' }),
+    email: z.string().nullable().openapi({ example: 'alice@example.test' }),
     role: z
       .enum(FRONTEND_ROLES)
       .nullable()
       .openapi({ description: 'One role for the frontend, derived from the roles in the active school. null while there is no school.' }),
+    userType: z.enum(['student', 'guardian', 'staff', 'admin', 'owner']),
+    status: z.enum(['active', 'invited', 'suspended', 'deleted']),
     permissions: z.array(z.string()).openapi({ example: ['*'], description: '["*"] = every permission (owners). [] while there is no school.' }),
     avatar: z.string().nullable(),
+    avatarFileId: id('1').nullable(),
     phone: z.string().nullable(),
+    languageId: id('1').nullable(),
+    timezone: z.string().nullable(),
+    preferences: z.record(z.string(), z.unknown()),
+    mustChangePassword: z.boolean(),
+    mfaEnabled: z.boolean(),
     organization: z
       .object({ id: id('7'), slug: z.string(), name: z.string(), roles: z.array(z.string()) })
       .nullable()
@@ -82,9 +91,14 @@ export const Member = z
   .object({
     id: id('12').openapi({ description: 'The MEMBERSHIP id. Use it in /members/{id}.' }),
     userId: id('13'),
+    username: z.string().nullable(),
     name: z.string().openapi({ example: 'Bob Teacher' }),
-    email: z.string().openapi({ example: 'bob@example.test' }),
+    email: z.string().nullable().openapi({ example: 'bob@example.test' }),
     phone: z.string().nullable(),
+    userType: z.enum(['student', 'guardian', 'staff', 'admin', 'owner']),
+    userStatus: z.enum(['active', 'invited', 'suspended', 'deleted']),
+    invitedAt: z.string().datetime().nullable(),
+    lastLoginAt: z.string().datetime().nullable(),
     status: z.enum(['active', 'suspended']),
     roles: z.array(z.string()).openapi({ example: ['teacher'] }),
     createdAt: z.string().datetime(),
@@ -312,6 +326,509 @@ export const AssetMaintenance = z
     status: z.enum(['reported', 'in_progress', 'completed', 'cancelled']), nextDueOn: z.string().nullable(),
   })
   .openapi('AssetMaintenance');
+
+export const AdmissionStatusHistoryItem = z
+  .object({
+    id: id('802'),
+    admissionId: id('801'),
+    fromStatus: z.string().nullable(),
+    toStatus: z.string(),
+    note: z.string().nullable(),
+    changedBy: id('8').nullable(),
+    changedByName: z.string().nullable().optional(),
+    createdAt: z.string().datetime(),
+  })
+  .openapi('AdmissionStatusHistoryItem');
+
+export const Admission = z
+  .object({
+    id: id('801'),
+    applicationNo: z.string().openapi({ example: 'APP-2026-0001' }),
+    academicYearId: id('1'),
+    classId: id('301'),
+    firstName: z.string(),
+    lastName: z.string(),
+    dob: z.string(),
+    gender: z.string().nullable(),
+    email: z.string().nullable(),
+    phone: z.string().nullable(),
+    bloodGroup: z.string().nullable(),
+    religionId: id('1').nullable(),
+    socialCategory: z.string().nullable(),
+    fatherName: z.string().nullable(),
+    fatherPhone: z.string().nullable(),
+    fatherEmail: z.string().nullable(),
+    fatherOccupation: z.string().nullable(),
+    motherName: z.string().nullable(),
+    motherPhone: z.string().nullable(),
+    motherEmail: z.string().nullable(),
+    motherOccupation: z.string().nullable(),
+    guardianName: z.string(),
+    guardianPhone: z.string(),
+    guardianEmail: z.string().nullable(),
+    previousSchool: z.string().nullable(),
+    previousClass: z.string().nullable(),
+    addressLine1: z.string().nullable(),
+    addressLine2: z.string().nullable(),
+    cityId: id('1').nullable(),
+    postalCode: z.string().nullable(),
+    status: z.enum(['enquiry', 'applied', 'document_review', 'shortlisted', 'waitlisted', 'offered', 'accepted', 'rejected', 'withdrawn']),
+    appliedOn: z.string(),
+    acknowledgedAt: z.string().datetime().nullable(),
+    decisionOn: z.string().nullable(),
+    decidedBy: id('8').nullable(),
+    decisionNotes: z.string().nullable(),
+    rejectionReason: z.string().nullable(),
+    waitlistPosition: z.number().int().nullable(),
+    assignedToStaffId: id('101').nullable(),
+    needsTransport: z.boolean(),
+    needsHostel: z.boolean(),
+    applicationFee: z.string().nullable(),
+    feePaid: z.boolean(),
+    feePaidOn: z.string().nullable(),
+    feePaymentMethod: z.string().nullable(),
+    source: z.enum(['walk_in', 'website', 'referral', 'agent', 'event', 'other']),
+    studentId: id('901').nullable(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('Admission');
+
+export const StudentHouse = z
+  .object({
+    id: id('905'),
+    name: z.string().openapi({ example: 'Sapphire House' }),
+    color: z.string().nullable().openapi({ example: '#2563EB' }),
+    motto: z.string().nullable(),
+    houseMasterId: id('101').nullable(),
+    isActive: z.boolean(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('StudentHouse');
+
+export const Guardian = z
+  .object({
+    id: id('902'),
+    userId: id('8').nullable(),
+    fullName: z.string(),
+    relation: z.enum(['father', 'mother', 'guardian', 'other']),
+    phone: z.string(),
+    altPhone: z.string().nullable(),
+    email: z.string().nullable(),
+    occupation: z.string().nullable(),
+    annualIncome: z.string().nullable(),
+    addressLine1: z.string().nullable(),
+    addressLine2: z.string().nullable(),
+    cityId: id('1').nullable(),
+    postalCode: z.string().nullable(),
+    photoFileId: id('1').nullable(),
+    idProofType: z.string().nullable(),
+    idProofNo: z.string().nullable(),
+    isEmergencyContact: z.boolean(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('Guardian');
+
+export const StudentGuardian = Guardian.extend({
+  isPrimary: z.boolean(),
+  canPickUp: z.boolean(),
+  linkedAt: z.string().datetime(),
+}).openapi('StudentGuardian');
+
+export const StudentDocument = z
+  .object({
+    id: id('903'),
+    studentId: id('901'),
+    documentType: z.string(),
+    fileId: id('1'),
+    documentNo: z.string().nullable(),
+    issuedOn: z.string().nullable(),
+    expiresOn: z.string().nullable(),
+    verifiedStatus: z.enum(['pending', 'verified', 'rejected']),
+    verifiedBy: id('8').nullable(),
+    verifiedAt: z.string().datetime().nullable(),
+    remarks: z.string().nullable(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('StudentDocument');
+
+export const Student = z
+  .object({
+    id: id('901'),
+    userId: id('8').nullable(),
+    admissionId: id('801').nullable(),
+    admissionNo: z.string().openapi({ example: 'STU-2026-0001' }),
+    firstName: z.string(),
+    lastName: z.string(),
+    fullName: z.string().nullable(),
+    dob: z.string(),
+    gender: z.string().nullable(),
+    bloodGroup: z.string().nullable(),
+    religionId: id('1').nullable(),
+    socialCategory: z.string().nullable(),
+    motherTongueId: id('1').nullable(),
+    photoFileId: id('1').nullable(),
+    fatherName: z.string().nullable(),
+    fatherPhone: z.string().nullable(),
+    fatherEmail: z.string().nullable(),
+    fatherOccupation: z.string().nullable(),
+    motherName: z.string().nullable(),
+    motherPhone: z.string().nullable(),
+    motherEmail: z.string().nullable(),
+    motherOccupation: z.string().nullable(),
+    primaryGuardianId: id('902').nullable(),
+    addressLine1: z.string().nullable(),
+    addressLine2: z.string().nullable(),
+    cityId: id('1').nullable(),
+    postalCode: z.string().nullable(),
+    studentHouseId: id('905').nullable(),
+    status: z.enum(['active', 'inactive', 'alumni', 'transferred_out', 'expelled']),
+    admittedOn: z.string(),
+    leftOn: z.string().nullable(),
+    leftReason: z.string().nullable(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('Student');
+
+export const StudentAttendance = z
+  .object({
+    enrollmentId: id('501'),
+    attendanceDate: z.string().openapi({ example: '2026-09-01' }),
+    status: z.enum(['present', 'absent', 'late', 'half_day', 'excused']),
+    checkIn: z.string().nullable(),
+    checkOut: z.string().nullable(),
+    remarks: z.string().nullable(),
+    source: z.enum(['manual', 'biometric', 'rfid', 'app']),
+    markedBy: id('8').nullable(),
+    markedAt: z.string().datetime(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('StudentAttendance');
+
+export const StaffAttendance = z
+  .object({
+    staffId: id('101'),
+    attendanceDate: z.string().openapi({ example: '2026-09-01' }),
+    status: z.enum(['present', 'absent', 'late', 'half_day', 'on_leave']),
+    checkIn: z.string().datetime().nullable(),
+    checkOut: z.string().datetime().nullable(),
+    workedMinutes: z.number().int().nullable(),
+    leaveRequestId: id('601').nullable(),
+    shiftId: id('1').nullable(),
+    source: z.string(),
+    markedBy: id('8').nullable(),
+    markedAt: z.string().datetime(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('StaffAttendance');
+
+export const AttendanceRule = z
+  .object({
+    id: id('610'),
+    audience: z.enum(['student', 'staff']),
+    branchId: id('1').nullable(),
+    name: z.string(),
+    lateAfter: z.string().nullable(),
+    halfDayAfter: z.string().nullable(),
+    absentAfter: z.string().nullable(),
+    minAttendancePercent: z.string().nullable(),
+    graceMinutes: z.number().int(),
+    workingWeekdays: z.array(z.number().int()),
+    effectiveFrom: z.string(),
+    effectiveTo: z.string(),
+    isActive: z.boolean(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('AttendanceRule');
+
+export const CalendarEvent = z
+  .object({
+    id: id('620'),
+    academicYearId: id('1').nullable(),
+    branchId: id('1').nullable(),
+    title: z.string(),
+    description: z.string().nullable(),
+    eventType: z.enum(['holiday', 'exam', 'event', 'meeting', 'other']),
+    startsAt: z.string().datetime(),
+    endsAt: z.string().datetime(),
+    allDay: z.boolean(),
+    audience: z.enum(['all', 'students', 'staff', 'class']),
+    classId: id('10').nullable(),
+    location: z.string().nullable(),
+    color: z.string().nullable(),
+    notifyVia: z.array(z.string()),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('CalendarEvent');
+
+export const LeaveType = z
+  .object({
+    id: id('630'),
+    code: z.string().openapi({ example: 'CL' }),
+    name: z.string().openapi({ example: 'Casual Leave' }),
+    isPaid: z.boolean(),
+    annualQuota: z.string().nullable(),
+    maxConsecutiveDays: z.number().int().nullable(),
+    requiresDocument: z.boolean(),
+    carryForward: z.boolean().nullable(),
+    carryForwardLimit: z.string().nullable(),
+    applicableTo: z.enum(['staff', 'student', 'both']),
+    leaveCategory: z.string(),
+    accrualBasis: z.enum(['annual', 'monthly', 'none']),
+    isActive: z.boolean(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('LeaveType');
+
+export const LeaveRequest = z
+  .object({
+    id: id('640'),
+    studentId: id('901').nullable(),
+    staffId: id('101').nullable(),
+    leaveTypeId: id('630').nullable(),
+    requestedByUserId: id('8').nullable(),
+    fromDate: z.string(),
+    toDate: z.string(),
+    days: z.string(),
+    durationType: z.enum(['full_day', 'half_day']),
+    reason: z.string(),
+    documentFileId: id('1').nullable(),
+    status: z.enum(['pending', 'approved', 'rejected', 'cancelled']),
+    decidedBy: id('8').nullable(),
+    decidedAt: z.string().datetime().nullable(),
+    decisionNotes: z.string().nullable(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('LeaveRequest');
+
+export const LeaveBalance = z
+  .object({
+    id: id('650'),
+    staffId: id('101'),
+    leaveTypeId: id('630'),
+    academicYearId: id('1'),
+    allocated: z.string(),
+    used: z.string(),
+    carriedForward: z.string(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('LeaveBalance');
+
+export const FeeGroup = z
+  .object({
+    id: id('701'),
+    name: z.string(),
+    code: z.string().nullable(),
+    category: z.string(),
+    displayOrder: z.number().int(),
+    isActive: z.boolean(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('FeeGroup');
+
+export const FeeType = z
+  .object({
+    id: id('702'),
+    feeGroupId: id('701').nullable(),
+    code: z.string(),
+    name: z.string(),
+    category: z.string(),
+    frequency: z.enum(['one_time', 'monthly', 'quarterly', 'annual']),
+    isRefundable: z.boolean(),
+    isMandatory: z.boolean(),
+    lateFeeApplicable: z.boolean(),
+    defaultAmount: z.string().nullable(),
+    status: z.string(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('FeeType');
+
+export const FeeStructureItem = z
+  .object({
+    id: id('704'),
+    feeStructureId: id('703'),
+    feeTypeId: id('702'),
+    amount: z.string(),
+    isOptional: z.boolean(),
+    dueOn: z.string().nullable(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('FeeStructureItem');
+
+export const FeeInstallment = z
+  .object({
+    id: id('705'),
+    feeStructureId: id('703'),
+    name: z.string(),
+    sequence: z.number().int(),
+    dueOn: z.string(),
+    percentOfTotal: z.string(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('FeeInstallment');
+
+export const FeeStructure = z
+  .object({
+    id: id('703'),
+    academicYearId: id('1'),
+    classId: id('10'),
+    name: z.string().nullable(),
+    code: z.string().nullable(),
+    description: z.string().nullable(),
+    frequency: z.string(),
+    effectiveFrom: z.string().nullable(),
+    status: z.string(),
+    items: z.array(FeeStructureItem).optional(),
+    installments: z.array(FeeInstallment).optional(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('FeeStructure');
+
+export const FeeAssignment = z
+  .object({
+    id: id('706'),
+    enrollmentId: id('501'),
+    feeStructureId: id('703'),
+    assignedOn: z.string(),
+    discountPercent: z.string(),
+    status: z.enum(['active', 'cancelled']),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('FeeAssignment');
+
+export const InvoiceLine = z
+  .object({
+    id: id('711'),
+    invoiceId: id('710'),
+    lineType: z.enum(['fee', 'discount', 'fine', 'tax']),
+    feeTypeId: id('702').nullable(),
+    quantity: z.string(),
+    unitAmount: z.string(),
+    discountAmount: z.string(),
+    taxAmount: z.string(),
+    lineTotal: z.string(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('InvoiceLine');
+
+export const Invoice = z
+  .object({
+    id: id('710'),
+    number: z.string(),
+    studentId: id('901'),
+    enrollmentId: id('501').nullable(),
+    academicYearId: id('1'),
+    installmentId: id('705').nullable(),
+    issuedOn: z.string(),
+    dueOn: z.string(),
+    status: z.enum(['draft', 'issued', 'partially_paid', 'paid', 'overdue', 'void']),
+    totalAmount: z.string().optional(),
+    lines: z.array(InvoiceLine).optional(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('Invoice');
+
+export const Payment = z
+  .object({
+    id: id('720'),
+    receiptNo: z.string(),
+    studentId: id('901'),
+    amount: z.string(),
+    method: z.enum(['cash', 'card', 'bank_transfer', 'cheque', 'online', 'upi']),
+    receivedAt: z.string().datetime(),
+    receivedBy: id('8').nullable(),
+    status: z.enum(['cleared', 'pending', 'bounced', 'reversed']),
+    idempotencyKey: z.string().nullable(),
+    chequeNo: z.string().nullable(),
+    chequeDate: z.string().nullable(),
+    chequeStatus: z.string().nullable(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('Payment');
+
+export const ExpenseCategory = z
+  .object({
+    id: id('730'),
+    name: z.string(),
+    parentId: id('730').nullable(),
+    annualBudget: z.string().nullable(),
+    perExpenseLimit: z.string().nullable(),
+    approvalLevel: z.enum(['none', 'manager', 'admin', 'owner']),
+    isActive: z.boolean(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('ExpenseCategory');
+
+export const Expense = z
+  .object({
+    id: id('740'),
+    expenseNo: z.string(),
+    categoryId: id('730'),
+    vendorId: id('1').nullable(),
+    branchId: id('1').nullable(),
+    staffId: id('101').nullable(),
+    priority: z.enum(['low', 'normal', 'high', 'urgent']),
+    amount: z.string(),
+    taxAmount: z.string(),
+    expenseDate: z.string(),
+    description: z.string(),
+    paymentMethod: z.string().nullable(),
+    receiptFileId: id('1').nullable(),
+    status: z.enum(['submitted', 'approved', 'rejected', 'paid']),
+    approvedBy: id('8').nullable(),
+    approvedAt: z.string().datetime().nullable(),
+    paidAt: z.string().datetime().nullable(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('Expense');
+
+export const ExitPass = z
+  .object({
+    id: id('801'),
+    studentId: id('901').nullable(),
+    requestedByGuardianId: id('902').nullable(),
+    requestedByStaffId: id('101').nullable(),
+    reason: z.string(),
+    reasonType: z.string(),
+    requestedExitAt: z.string().datetime(),
+    expectedReturnAt: z.string().datetime(),
+    status: z.enum(['pending', 'approved', 'rejected', 'used', 'expired', 'revoked']),
+    approvedBy: id('8').nullable(),
+    approvedAt: z.string().datetime().nullable(),
+    rejectionReason: z.string().nullable(),
+    pickedUpByGuardianId: id('902').nullable(),
+    authorizedPersonName: z.string().nullable(),
+    authorizedPersonRelation: z.string().nullable(),
+    actualExitAt: z.string().datetime().nullable(),
+    actualReturnAt: z.string().datetime().nullable(),
+    passCode: z.string(),
+    usedAt: z.string().datetime().nullable(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .openapi('ExitPass');
 
 // { success: true, data, meta? } - the envelope the frontend's apiClient expects.
 export const envelope = <T extends z.ZodTypeAny>(name: string, data: T) =>

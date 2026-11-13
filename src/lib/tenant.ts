@@ -9,6 +9,7 @@ export interface TenantContext {
   name: string;
   roles: string[]; // the caller's role codes in THIS school, e.g. ["owner"]
   permissions: Set<string>; // permission codes those roles grant, e.g. "students.create"; "*" = everything (owner)
+  rolePermissions?: Map<string, Set<string>>; // per-role granted permission codes (used for row-level scoping)
 }
 
 export function hasPermission(tenant: TenantContext, code: string): boolean {
@@ -71,7 +72,13 @@ export async function loadTenantContext(userId: bigint, tenantId: bigint): Promi
   const grantedPermissions = new Set(grantRows.map((r) => r.permissionCode).filter((c): c is string => c !== null));
   if (roleCodes.includes("owner")) grantedPermissions.add("*"); // owners can do everything, including future permissions
 
-  return { id: row.tenantId, slug: row.slug, name: row.name, roles: roleCodes, permissions: grantedPermissions };
+  const rolePermissionsMap = new Map<string, Set<string>>();
+  for (const r of grantRows) {
+    if (!rolePermissionsMap.has(r.roleCode)) rolePermissionsMap.set(r.roleCode, new Set());
+    if (r.permissionCode !== null) rolePermissionsMap.get(r.roleCode)!.add(r.permissionCode);
+  }
+
+  return { id: row.tenantId, slug: row.slug, name: row.name, roles: roleCodes, permissions: grantedPermissions, rolePermissions: rolePermissionsMap };
 }
 
 // Every school this person belongs to, with THEIR roles in each one.

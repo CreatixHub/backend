@@ -1,46 +1,55 @@
-import * as argon2 from 'argon2';
-import { and, eq, isNull } from 'drizzle-orm';
-import { db } from '../../db';
-import { memberships, organizations, refreshTokens, users } from '../../db/schema';
-import { HttpError } from '../../lib/errors';
-import { sha256 } from '../../lib/hash';
-import { listMyOrganizations, loadTenantContext, pickTenantId } from '../../lib/tenant';
-import type { TenantContext } from '../../lib/tenant';
-import type { LoginInput, SignupInput } from './auth.schemas';
-import { createSession } from './session';
-import type { ClientMeta } from './session';
+import * as argon2 from "argon2";
+import { isIP } from "node:net";
+import { and, eq, isNull } from "drizzle-orm";
+import { db } from "../../db";
+import { memberships, organizations, refreshTokens, users } from "../../db/schema";
+import { HttpError } from "../../lib/errors";
+import { sha256 } from "../../lib/hash";
+import { isForeignKeyViolation, isUniqueViolation, pgConstraint } from "../../lib/pgErrors";
+import {
+  listMyOrganizations,
+  loadTenantContext,
+  pickTenantId,
+} from "../../lib/tenant";
+import type { TenantContext } from "../../lib/tenant";
+import type { AuthUser } from "../../middleware/authenticate";
+import type { LoginInput, SignupInput } from "./auth.schemas";
+import { createSession } from "./session";
+import type { ClientMeta } from "./session";
 
 // What every auth function returns; auth.routes.ts hands it to sendSession().
 export interface AuthResult {
   session: { accessToken: string; refreshToken: string };
-  user: {
-    id: bigint;
-    fullName: string;
-    email: string;
-    phone: string | null;
-    avatarUrl: string | null;
-  };
+  user: AuthUser;
   tenant: TenantContext | null;
   organizations: unknown[];
 }
 
 const PUBLIC_USER_COLUMNS = {
   id: users.id,
+  username: users.username,
   email: users.email,
   fullName: users.fullName,
   phone: users.phone,
   avatarUrl: users.avatarUrl,
+  avatarFileId: users.avatarFileId,
+  languageId: users.languageId,
+  timezone: users.timezone,
+  preferences: users.preferences,
+  userType: users.userType,
+  status: users.status,
+  mustChangePassword: users.mustChangePassword,
+  mfaEnabled: users.mfaEnabled,
 };
 
-// Postgres' own SQLSTATE for a unique-constraint violation (what Prisma called "P2002").
-const UNIQUE_VIOLATION = '23505';
-function isUniqueViolation(e: unknown): boolean {
-  if (typeof e !== 'object' || e === null) return false;
-  // node-postgres errors sometimes arrive wrapped (DrizzleQueryError, .cause holds the real pg error) and
-  // sometimes not, depending on the code path - check both rather than assuming one shape.
-  const code = (e as { code?: unknown }).code ?? (e as { cause?: { code?: unknown } }).cause?.code;
-  return code === UNIQUE_VIOLATION;
+function normalizeIp(raw?: string): string | null {
+  if (!raw) return null;
+  const candidate = raw.split(",")[0]?.trim();
+  return candidate && isIP(candidate) !== 0 ? candidate : null;
 }
+
+const MAX_FAILED_LOGIN_ATTEMPTS = 5;
+const LOCK_MINUTES = 15;
 
 // Verified against when the email is unknown, so "unknown email" and "wrong password" take the same time.
 const dummyHash = argon2.hash('not-a-real-password');
@@ -56,8 +65,16 @@ export async function signup(input: SignupInput, meta: ClientMeta): Promise<Auth
       .insert(users)
       .values({
         email: input.email,
+        username: input.username ?? null,
+        phone: input.phone ?? null,
         fullName: input.fullName,
         passwordHash,
+        userType: input.userType ?? "owner",
+        status: "active",
+        timezone: input.timezone ?? null,
+        languageId: input.languageId ?? null,
+        avatarFileId: input.avatarFileId ?? null,
+        preferences: input.preferences ?? {},
         passwordChangedAt: new Date(),
       })
       .returning(PUBLIC_USER_COLUMNS);
@@ -70,7 +87,13 @@ export async function signup(input: SignupInput, meta: ClientMeta): Promise<Auth
     return { session, user, tenant: null, organizations: [] };
   } catch (e) {
     if (isUniqueViolation(e)) {
-      throw new HttpError(409, 'An account with this email already exists');
+      if (pgConstraint(e) === "users_username_key") {
+        throw new HttpError(409, "An account with this username already exists");
+      }
+      throw new HttpError(409, "An account with this email already exists");
+    }
+    if (isForeignKeyViolation(e)) {
+      throw new HttpError(400, "Invalid reference ID provided");
     }
     throw e;
   }
@@ -80,24 +103,50 @@ export async function signup(input: SignupInput, meta: ClientMeta): Promise<Auth
 export async function login(input: LoginInput, meta: ClientMeta): Promise<AuthResult> {
   const invalid = () => new HttpError(401, 'Invalid email or password');
 
-  // find the person by email
+  // find the person by email or username
+  const identifierCond = input.email ? eq(users.email, input.email) : eq(users.username, input.username!);
   const [user] = await db
     .select()
     .from(users)
-    .where(and(eq(users.email, input.email), isNull(users.deletedAt)))
+    .where(and(identifierCond, isNull(users.deletedAt)))
     .limit(1);
 
-  // check the password without revealing whether the email exists
-  const passwordOk = user ? await argon2.verify(user.passwordHash, input.password) : false;
+  const isLocked = Boolean(user?.lockedUntil && user.lockedUntil > new Date());
+  const canVerify = Boolean(user && user.passwordHash && !isLocked);
 
-  if (!user) await argon2.verify(await dummyHash, input.password);
+  // check the password without revealing whether the email exists or is locked
+  const passwordOk = canVerify
+    ? await argon2.verify(user!.passwordHash!, input.password)
+    : false;
 
-  // one generic failure for: unknow email, wrong password, disabled account
-  //
-  if (!user || !passwordOk || user.status !== 'active') throw invalid();
+  if (!canVerify) await argon2.verify(await dummyHash, input.password);
+
+  if (user && !isLocked && user.passwordHash && !passwordOk && user.status === "active") {
+    const nextCount = Math.min(user.failedLoginCount + 1, 32767);
+    await db
+      .update(users)
+      .set({
+        failedLoginCount: nextCount,
+        ...(nextCount >= MAX_FAILED_LOGIN_ATTEMPTS
+          ? { lockedUntil: new Date(Date.now() + LOCK_MINUTES * 60_000) }
+          : {}),
+      })
+      .where(eq(users.id, user.id));
+  }
+
+  // one generic failure for: unknown email, wrong password, disabled/invited/locked account
+  if (!user || isLocked || !passwordOk || user.status !== "active") throw invalid();
 
   // record login
-  await db.update(users).set({ lastLoginAt: new Date() }).where(eq(users.id, user.id));
+  await db
+    .update(users)
+    .set({
+      lastLoginAt: new Date(),
+      lastLoginIp: normalizeIp(meta.ip),
+      failedLoginCount: 0,
+      lockedUntil: null,
+    })
+    .where(eq(users.id, user.id));
 
   // choose the school to start in (none yet for a new person)
   const tenantId = await pickTenantId(user.id, input.organization);
@@ -110,15 +159,26 @@ export async function login(input: LoginInput, meta: ClientMeta): Promise<AuthRe
     meta,
   });
 
+  const publicUser: AuthUser = {
+    id: user.id,
+    username: user.username,
+    email: user.email,
+    fullName: user.fullName,
+    phone: user.phone,
+    avatarUrl: user.avatarUrl,
+    avatarFileId: user.avatarFileId,
+    languageId: user.languageId,
+    timezone: user.timezone,
+    preferences: user.preferences,
+    userType: user.userType,
+    status: user.status,
+    mustChangePassword: user.mustChangePassword,
+    mfaEnabled: user.mfaEnabled,
+  };
+
   return {
     session,
-    user: {
-      id: user.id,
-      fullName: user.fullName,
-      email: user.email,
-      phone: user.phone,
-      avatarUrl: user.avatarUrl,
-    },
+    user: publicUser,
     tenant,
     organizations: await listMyOrganizations(user.id),
   };

@@ -2,6 +2,7 @@ import { and, asc, count, desc, eq, getTableColumns, gte, ilike, isNull, lte, or
 import { db } from '../../db';
 import { classes, classSubjects, homework, homeworkSubmissions, sections, staff, subjects } from '../../db/schema';
 import { HttpError } from '../../lib/errors';
+import { isRowScopedFor } from '../../lib/ownership';
 import type { TenantContext } from '../../lib/tenant';
 import type { AuthUser } from '../../middleware/authenticate';
 import type {
@@ -302,6 +303,10 @@ export async function removeHomework(tenant: TenantContext, id: bigint): Promise
 // ================================================================ SUBMISSIONS
 export async function listSubmissions(tenant: TenantContext, homeworkId: bigint, q: ListSubmissionsInput): Promise<Page> {
   await loadHomework(tenant.id, homeworkId);
+  // homework_submissions keys only by enrollment_id; fail closed until enrollments table exists
+  if (isRowScopedFor(tenant, 'homework.view')) {
+    return { rows: [], meta: pageMeta(q.page, q.limit, 0) };
+  }
   const where = and(
     eq(homeworkSubmissions.tenantId, tenant.id),
     eq(homeworkSubmissions.homeworkId, homeworkId),

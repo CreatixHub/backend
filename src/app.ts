@@ -38,6 +38,27 @@ import {
   assetMaintenanceRouter,
   assetsRouter,
 } from "./modules/assets/assets.routes";
+import { admissionsRouter } from "./modules/admissions/admissions.routes";
+import { guardiansRouter, studentHousesRouter, studentsRouter } from "./modules/students/students.routes";
+import {
+  attendanceRulesRouter,
+  calendarEventsRouter,
+  leaveBalancesRouter,
+  leaveRequestsRouter,
+  leaveTypesRouter,
+  staffAttendanceRouter,
+  studentAttendanceRouter,
+} from "./modules/attendance/attendance.routes";
+import {
+  feeAssignmentsRouter,
+  feeGroupsRouter,
+  feeStructuresRouter,
+  feeTypesRouter,
+  invoicesRouter,
+  paymentsRouter,
+} from "./modules/finance/finance.routes";
+import { expenseCategoriesRouter, expensesRouter } from "./modules/expenses/expenses.routes";
+import { exitPassesRouter } from "./modules/gatepass/gatepass.routes";
 // Building the app in a function (instead of starting the server here) lets tests use it too.
 // The ORDER of the lines below is the security design: Express runs them top to bottom.
 export function createApp() {
@@ -99,8 +120,28 @@ app.use("/api/route-schedules", routeSchedulesRouter);
 app.use("/api/transport-assignments", transportAssignmentsRouter);
 app.use("/api/asset-categories", assetCategoriesRouter);
 app.use("/api/assets", assetsRouter);
-app.use("/api/asset-allocations", assetAllocationsRouter);
-app.use("/api/asset-maintenance", assetMaintenanceRouter);
+  app.use("/api/asset-allocations", assetAllocationsRouter);
+  app.use("/api/asset-maintenance", assetMaintenanceRouter);
+  app.use("/api/admissions", admissionsRouter);
+  app.use("/api/students", studentsRouter);
+  app.use("/api/guardians", guardiansRouter);
+  app.use("/api/student-houses", studentHousesRouter);
+  app.use("/api/student-attendance", studentAttendanceRouter);
+  app.use("/api/staff-attendance", staffAttendanceRouter);
+  app.use("/api/attendance-rules", attendanceRulesRouter);
+  app.use("/api/calendar-events", calendarEventsRouter);
+  app.use("/api/leave-types", leaveTypesRouter);
+  app.use("/api/leave-requests", leaveRequestsRouter);
+  app.use("/api/leave-balances", leaveBalancesRouter);
+  app.use("/api/fee-groups", feeGroupsRouter);
+  app.use("/api/fee-types", feeTypesRouter);
+  app.use("/api/fee-structures", feeStructuresRouter);
+  app.use("/api/fee-assignments", feeAssignmentsRouter);
+  app.use("/api/invoices", invoicesRouter);
+  app.use("/api/payments", paymentsRouter);
+  app.use("/api/expense-categories", expenseCategoriesRouter);
+  app.use("/api/expenses", expensesRouter);
+  app.use("/api/exit-passes", exitPassesRouter);
 
   app.use((_req, _res, next) => next(new HttpError(404, "Not found"))); // nothing matched
   app.use(errorHandler); // must be the very last line

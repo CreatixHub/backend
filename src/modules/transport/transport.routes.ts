@@ -135,7 +135,7 @@ routeSchedulesRouter.delete('/:id', requirePermission('transport.delete'), async
 export const transportAssignmentsRouter = Router();
 
 transportAssignmentsRouter.get('/', requirePermission('transport.view'), async (req, res) => {
-  const result = await svc.listAssignments(currentTenant(req), listAssignmentsSchema.parse(req.query));
+  const result = await svc.listAssignments(currentTenant(req), currentUser(req), listAssignmentsSchema.parse(req.query));
   ok(res, result.rows, result.meta);
 });
 transportAssignmentsRouter.post('/', requirePermission('transport.create'), async (req, res) => {
