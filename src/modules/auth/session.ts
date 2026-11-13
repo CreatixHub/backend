@@ -70,6 +70,13 @@ export function toFrontendRole(roleCodes: string[]): string | null {
   return ROLE_PRIORITY.find((r) => roleCodes.includes(r)) ?? "receptionist"; // unknown custom role: neutral staff role
 }
 
+// Does the person hold the role they picked on the login page?
+// Owners and admins may enter any role's panel (they can do everything anyway); everyone else only their own roles.
+export function holdsRole(roleCodes: string[], selected: string): boolean {
+  if (roleCodes.includes("owner") || roleCodes.includes("admin")) return true;
+  return roleCodes.includes(selected);
+}
+
 // The user JSON your frontend's auth.http.ts reads.
 export function toFrontendUser(
   user: { id: bigint; fullName: string; email: string; phone: string | null; avatarUrl: string | null },

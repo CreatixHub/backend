@@ -33,13 +33,16 @@ export async function createOrganization(input: CreateOrganizationInput, user: A
           .values({ tenantId: org.id, code: def.code, name: def.name, description: def.description, isSystem: true })
           .returning({ id: roles.id });
         if (def.code === 'owner') ownerRoleId = role.id;
-        await tx.insert(rolePermissions).values(
-          def.permissions.map((code) => {
-            const id = permissionId.get(code);
-            if (!id) throw new Error(`Permission "${code}" is not in the database - run: npx tsx src/seed.ts`);
-            return { roleId: role.id, permissionId: id, tenantId: org.id };
-          }),
-        );
+
+        const permissionRowsForRole = def.permissions.map((code) => {
+          const id = permissionId.get(code);
+          if (!id) throw new Error(`Permission "${code}" is not in the database - run: npx tsx src/seed.ts`);
+          return { roleId: role.id, permissionId: id, tenantId: org.id };
+        });
+        // the owner role has no rows on purpose: it gets every permission through the "*" wildcard
+        if (permissionRowsForRole.length > 0) {
+          await tx.insert(rolePermissions).values(permissionRowsForRole);
+        }
       }
       if (!ownerRoleId) throw new Error('DEFAULT_ROLES must contain an "owner" role');
 

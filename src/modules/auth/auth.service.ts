@@ -1,4 +1,4 @@
-import * as argon2 from "argon2";
+import * as argon2 from '@node-rs/argon2';
 import { and, eq, isNull } from "drizzle-orm";
 import { db } from "../../db";
 import { memberships, organizations, refreshTokens, users } from "../../db/schema";
@@ -11,7 +11,7 @@ import {
 } from "../../lib/tenant";
 import type { TenantContext } from "../../lib/tenant";
 import type { LoginInput, SignupInput } from "./auth.schemas";
-import { createSession } from "./session";
+import { createSession, holdsRole } from "./session";
 import type { ClientMeta } from "./session";
 
 // What every auth function returns; auth.routes.ts hands it to sendSession().
@@ -104,12 +104,17 @@ export async function login(
   //
   if (!user || !passwordOk || user.status !== "active") throw invalid();
 
-  // record login
-  await db.update(users).set({ lastLoginAt: new Date() }).where(eq(users.id, user.id));
-
   // choose the school to start in (none yet for a new person)
   const tenantId = await pickTenantId(user.id, input.organization);
   const tenant = tenantId ? await loadTenantContext(user.id, tenantId) : null;
+
+  // "Sign in as": the person must really hold the role they picked
+  if (input.role && !(tenant && holdsRole(tenant.roles, input.role))) {
+    throw new HttpError(403, `You don't have access as ${input.role.replace(/_/g, " ")}`);
+  }
+
+  // record login
+  await db.update(users).set({ lastLoginAt: new Date() }).where(eq(users.id, user.id));
 
   // start the session
   const session = await createSession({

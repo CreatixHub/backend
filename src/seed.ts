@@ -1,4 +1,4 @@
-import * as argon2 from 'argon2';
+import * as argon2 from '@node-rs/argon2';
 import { eq } from 'drizzle-orm';
 import { Pool } from 'pg';
 import { drizzle } from 'drizzle-orm/node-postgres';
