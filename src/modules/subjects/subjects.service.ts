@@ -10,7 +10,11 @@ import type { CreateSubjectInput, ListSubjectsInput, UpdateSubjectInput } from '
 
 const UNIQUE_VIOLATION = '23505';
 function isUniqueViolation(e: unknown): boolean {
-  return typeof e === 'object' && e !== null && 'code' in e && (e as { code: unknown }).code === UNIQUE_VIOLATION;
+  if (typeof e !== 'object' || e === null) return false;
+  // node-postgres errors sometimes arrive wrapped (DrizzleQueryError, .cause holds the real pg error) and
+  // sometimes not, depending on the code path - check both rather than assuming one shape.
+  const code = (e as { code?: unknown }).code ?? (e as { cause?: { code?: unknown } }).cause?.code;
+  return code === UNIQUE_VIOLATION;
 }
 
 type SubjectRow = typeof subjects.$inferSelect;

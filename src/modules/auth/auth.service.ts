@@ -52,16 +52,13 @@ const MAX_FAILED_LOGIN_ATTEMPTS = 5;
 const LOCK_MINUTES = 15;
 
 // Verified against when the email is unknown, so "unknown email" and "wrong password" take the same time.
-const dummyHash = argon2.hash("not-a-real-password");
+const dummyHash = argon2.hash('not-a-real-password');
 
 // A refresh token used within this many seconds is a harmless race (second tab, React double-start): 409, no revoke.
 const REFRESH_GRACE_SECONDS = 10;
 
 // ---------------------------------------------------------------- C6
-export async function signup(
-  input: SignupInput,
-  meta: ClientMeta,
-): Promise<AuthResult> {
+export async function signup(input: SignupInput, meta: ClientMeta): Promise<AuthResult> {
   const passwordHash = await argon2.hash(input.password);
   try {
     const [user] = await db
@@ -103,11 +100,8 @@ export async function signup(
 }
 
 // ---------------------------------------------------------------- C7
-export async function login(
-  input: LoginInput,
-  meta: ClientMeta,
-): Promise<AuthResult> {
-  const invalid = () => new HttpError(401, "Invalid email or password");
+export async function login(input: LoginInput, meta: ClientMeta): Promise<AuthResult> {
+  const invalid = () => new HttpError(401, 'Invalid email or password');
 
   // find the person by email or username
   const identifierCond = input.email ? eq(users.email, input.email) : eq(users.username, input.username!);
@@ -192,30 +186,27 @@ export async function login(
 
 // ---------------------------------------------------------------- C9
 // cookieToken = req.cookies.rt (undefined when the cookie is missing)
-export async function refresh(
-  cookieToken: string | undefined,
-  meta: ClientMeta,
-): Promise<AuthResult> {
-  if (!cookieToken) throw new HttpError(401, "Unauthorized");
+export async function refresh(cookieToken: string | undefined, meta: ClientMeta): Promise<AuthResult> {
+  if (!cookieToken) throw new HttpError(401, 'Unauthorized');
 
   const [row] = await db
     .select()
     .from(refreshTokens)
     .where(eq(refreshTokens.tokenHash, sha256(cookieToken)))
     .limit(1);
-  if (!row || row.revokedAt) throw new HttpError(401, "Unauthorized");
+  if (!row || row.revokedAt) throw new HttpError(401, 'Unauthorized');
 
   if (row.usedAt) {
     const secondsAgo = (Date.now() - row.usedAt.getTime()) / 1000;
     if (secondsAgo <= REFRESH_GRACE_SECONDS) {
       // a second browser tab or a React double-start raced us: harmless, revoke nothing
-      throw new HttpError(409, "Session refresh in progress");
+      throw new HttpError(409, 'Session refresh in progress');
     }
     // an OLD token was replayed much later: somebody copied it. Kill the whole login.
-    await revokeFamily(row.familyId, "reuse_detected");
-    throw new HttpError(401, "Unauthorized");
+    await revokeFamily(row.familyId, 'reuse_detected');
+    throw new HttpError(401, 'Unauthorized');
   }
-  if (row.expiresAt < new Date()) throw new HttpError(401, "Unauthorized");
+  if (row.expiresAt < new Date()) throw new HttpError(401, 'Unauthorized');
 
   // claim it atomically: of two simultaneous requests only ONE can flip usedAt from null
   const claimed = await db
@@ -223,14 +214,14 @@ export async function refresh(
     .set({ usedAt: new Date() })
     .where(and(eq(refreshTokens.id, row.id), isNull(refreshTokens.usedAt), isNull(refreshTokens.revokedAt)))
     .returning({ id: refreshTokens.id });
-  if (claimed.length !== 1) throw new HttpError(409, "Session refresh in progress");
+  if (claimed.length !== 1) throw new HttpError(409, 'Session refresh in progress');
 
   const [user] = await db
     .select(PUBLIC_USER_COLUMNS)
     .from(users)
-    .where(and(eq(users.id, row.userId), eq(users.status, "active"), isNull(users.deletedAt)))
+    .where(and(eq(users.id, row.userId), eq(users.status, 'active'), isNull(users.deletedAt)))
     .limit(1);
-  if (!user) throw new HttpError(401, "Unauthorized");
+  if (!user) throw new HttpError(401, 'Unauthorized');
 
   // keep the school this session was in if the membership is still valid, otherwise fall back
   let tenant = row.tenantId ? await loadTenantContext(user.id, row.tenantId) : null;
@@ -255,7 +246,7 @@ export async function logout(cookieToken: string | undefined): Promise<void> {
     .from(refreshTokens)
     .where(eq(refreshTokens.tokenHash, sha256(cookieToken)))
     .limit(1);
-  if (row) await revokeFamily(row.familyId, "logout");
+  if (row) await revokeFamily(row.familyId, 'logout');
 }
 
 // ---------------------------------------------------------------- C10c
@@ -267,7 +258,7 @@ export async function switchOrganization(
 ): Promise<AuthResult> {
   // The person's own active membership in the school with that slug. We query it directly (pickTenantId would
   // FALL BACK to another school). Same 403 whether the school does not exist or the person is not in it.
-  const noAccess = () => new HttpError(403, "You do not have access to this organization");
+  const noAccess = () => new HttpError(403, 'You do not have access to this organization');
   const [membership] = await db
     .select({ tenantId: memberships.tenantId })
     .from(memberships)
@@ -275,9 +266,9 @@ export async function switchOrganization(
     .where(
       and(
         eq(memberships.userId, userId),
-        eq(memberships.status, "active"),
+        eq(memberships.status, 'active'),
         eq(organizations.slug, slug.toLowerCase()),
-        eq(organizations.status, "active"),
+        eq(organizations.status, 'active'),
         isNull(organizations.deletedAt),
       ),
     )
@@ -299,7 +290,9 @@ export async function switchOrganization(
       const claimed = await db
         .update(refreshTokens)
         .set({ usedAt: new Date() })
-        .where(and(eq(refreshTokens.id, row.id), isNull(refreshTokens.usedAt), isNull(refreshTokens.revokedAt)))
+        .where(
+          and(eq(refreshTokens.id, row.id), isNull(refreshTokens.usedAt), isNull(refreshTokens.revokedAt)),
+        )
         .returning({ id: refreshTokens.id });
       if (claimed.length === 1) familyId = row.familyId;
     }
@@ -308,9 +301,9 @@ export async function switchOrganization(
   const [user] = await db
     .select(PUBLIC_USER_COLUMNS)
     .from(users)
-    .where(and(eq(users.id, userId), eq(users.status, "active"), isNull(users.deletedAt)))
+    .where(and(eq(users.id, userId), eq(users.status, 'active'), isNull(users.deletedAt)))
     .limit(1);
-  if (!user) throw new HttpError(401, "Unauthorized");
+  if (!user) throw new HttpError(401, 'Unauthorized');
 
   const session = await createSession({ userId, tenantId: tenant.id, meta, familyId });
   return { session, user, tenant, organizations: await listMyOrganizations(userId) };
