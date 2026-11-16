@@ -80,7 +80,10 @@ async function assertHouse(tenantId: bigint, houseId: bigint) {
 async function nextApplicationNo(tx: Tx, tenantId: bigint, year: string, offset: number): Promise<string> {
   const prefix = `APP-${year}-`;
   const [r] = await tx
-    .select({ max: sql<number | null>`max(substring(${admissions.applicationNo} from ${prefix.length + 1})::int)` })
+    // ::int on the "from" offset is required: an untyped parameter here makes Postgres resolve the AMBIGUOUS
+    // substring(text, text) pattern-matching overload instead of substring(text, int) positional one, which
+    // silently returns NULL for every row (so this always looked like "no admissions yet" and proposed 0001).
+    .select({ max: sql<number | null>`max(substring(${admissions.applicationNo} from ${prefix.length + 1}::int)::int)` })
     .from(admissions)
     .where(and(eq(admissions.tenantId, tenantId), sql`${admissions.applicationNo} ~ ${'^APP-' + year + '-[0-9]+$'}`));
   return `${prefix}${String(Number(r?.max ?? 0) + 1 + offset).padStart(4, '0')}`;
@@ -89,7 +92,7 @@ async function nextApplicationNo(tx: Tx, tenantId: bigint, year: string, offset:
 async function nextStudentAdmissionNo(tx: Tx, tenantId: bigint, year: string, offset: number): Promise<string> {
   const prefix = `STU-${year}-`;
   const [r] = await tx
-    .select({ max: sql<number | null>`max(substring(${students.admissionNo} from ${prefix.length + 1})::int)` })
+    .select({ max: sql<number | null>`max(substring(${students.admissionNo} from ${prefix.length + 1}::int)::int)` })
     .from(students)
     .where(and(eq(students.tenantId, tenantId), sql`${students.admissionNo} ~ ${'^STU-' + year + '-[0-9]+$'}`));
   return `${prefix}${String(Number(r?.max ?? 0) + 1 + offset).padStart(4, '0')}`;
