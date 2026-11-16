@@ -49,5 +49,10 @@ export const switchOrganizationSchema = z
   .object({ organization: z.string().trim().min(1).max(60) })
   .strict();
 
+// B3: Validates the refresh token sent in the JSON body by mobile clients.
+export const mobileRefreshSchema = z
+  .object({ refreshToken: z.string().min(1, 'Refresh token is required') })
+  .strict();
+
 export type SignupInput = z.infer<typeof signupSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;
