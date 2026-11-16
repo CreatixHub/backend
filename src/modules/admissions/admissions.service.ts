@@ -80,10 +80,14 @@ async function assertHouse(tenantId: bigint, houseId: bigint) {
 async function nextApplicationNo(tx: Tx, tenantId: bigint, year: string, offset: number): Promise<string> {
   const prefix = `APP-${year}-`;
   const [r] = await tx
+<<<<<<< HEAD
     // ::int on the "from" offset is required: an untyped parameter here makes Postgres resolve the AMBIGUOUS
     // substring(text, text) pattern-matching overload instead of substring(text, int) positional one, which
     // silently returns NULL for every row (so this always looked like "no admissions yet" and proposed 0001).
     .select({ max: sql<number | null>`max(substring(${admissions.applicationNo} from ${prefix.length + 1}::int)::int)` })
+=======
+    .select({ max: sql<number | null>`max(substring(${admissions.applicationNo} from ${prefix.length + 1})::int)` })
+>>>>>>> origin/Stage
     .from(admissions)
     .where(and(eq(admissions.tenantId, tenantId), sql`${admissions.applicationNo} ~ ${'^APP-' + year + '-[0-9]+$'}`));
   return `${prefix}${String(Number(r?.max ?? 0) + 1 + offset).padStart(4, '0')}`;
@@ -92,7 +96,11 @@ async function nextApplicationNo(tx: Tx, tenantId: bigint, year: string, offset:
 async function nextStudentAdmissionNo(tx: Tx, tenantId: bigint, year: string, offset: number): Promise<string> {
   const prefix = `STU-${year}-`;
   const [r] = await tx
+<<<<<<< HEAD
     .select({ max: sql<number | null>`max(substring(${students.admissionNo} from ${prefix.length + 1}::int)::int)` })
+=======
+    .select({ max: sql<number | null>`max(substring(${students.admissionNo} from ${prefix.length + 1})::int)` })
+>>>>>>> origin/Stage
     .from(students)
     .where(and(eq(students.tenantId, tenantId), sql`${students.admissionNo} ~ ${'^STU-' + year + '-[0-9]+$'}`));
   return `${prefix}${String(Number(r?.max ?? 0) + 1 + offset).padStart(4, '0')}`;
@@ -231,6 +239,7 @@ export async function createAdmission(tenant: TenantContext, actor: AuthUser, in
       for (let attempt = 0; attempt < 5; attempt++) {
         const applicationNo = input.applicationNo ?? (await nextApplicationNo(tx, tenant.id, year, attempt));
         try {
+<<<<<<< HEAD
           // A nested transaction = a SAVEPOINT: if this attempt's insert collides on applicationNo, only
           // THIS attempt rolls back. Without it, Postgres marks the whole outer transaction aborted on the
           // unique-violation, and the next attempt's nextApplicationNo() SELECT fails with "current
@@ -270,6 +279,41 @@ export async function createAdmission(tenant: TenantContext, actor: AuthUser, in
             const history = await loadHistory(tenant.id, createdRow.id, tx2);
             return { ...toAdmission(createdRow), history };
           });
+=======
+          const [createdRow] = await tx
+            .insert(admissions)
+            .values({
+              ...columns,
+              tenantId: tenant.id,
+              applicationNo,
+              academicYearId: input.academicYearId,
+              classId: input.classId,
+              firstName: input.firstName,
+              lastName: input.lastName,
+              dob: input.dob,
+              guardianName: input.guardianName,
+              guardianPhone: input.guardianPhone,
+              appliedOn,
+              status: initialStatus,
+              needsTransport: input.needsTransport ?? false,
+              needsHostel: input.needsHostel ?? false,
+              feePaid: input.feePaid ?? false,
+              source: input.source,
+            })
+            .returning();
+
+          await tx.insert(admissionStatusHistory).values({
+            tenantId: tenant.id,
+            admissionId: createdRow.id,
+            fromStatus: null,
+            toStatus: initialStatus,
+            note: input.note ?? null,
+            changedBy: actor.id,
+          });
+
+          const history = await loadHistory(tenant.id, createdRow.id, tx);
+          return { ...toAdmission(createdRow), history };
+>>>>>>> origin/Stage
         } catch (e) {
           if (!isUniqueViolation(e) || input.applicationNo) throw e;
         }
