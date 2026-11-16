@@ -228,39 +228,45 @@ export async function createAdmission(tenant: TenantContext, actor: AuthUser, in
       for (let attempt = 0; attempt < 5; attempt++) {
         const applicationNo = input.applicationNo ?? (await nextApplicationNo(tx, tenant.id, year, attempt));
         try {
-          const [createdRow] = await tx
-            .insert(admissions)
-            .values({
-              ...columns,
+          // A nested transaction = a SAVEPOINT: if this attempt's insert collides on applicationNo, only
+          // THIS attempt rolls back. Without it, Postgres marks the whole outer transaction aborted on the
+          // unique-violation, and the next attempt's nextApplicationNo() SELECT fails with "current
+          // transaction is aborted" instead of retrying cleanly.
+          return await tx.transaction(async (tx2) => {
+            const [createdRow] = await tx2
+              .insert(admissions)
+              .values({
+                ...columns,
+                tenantId: tenant.id,
+                applicationNo,
+                academicYearId: input.academicYearId,
+                classId: input.classId,
+                firstName: input.firstName,
+                lastName: input.lastName,
+                dob: input.dob,
+                guardianName: input.guardianName,
+                guardianPhone: input.guardianPhone,
+                appliedOn,
+                status: initialStatus,
+                needsTransport: input.needsTransport ?? false,
+                needsHostel: input.needsHostel ?? false,
+                feePaid: input.feePaid ?? false,
+                source: input.source,
+              })
+              .returning();
+
+            await tx2.insert(admissionStatusHistory).values({
               tenantId: tenant.id,
-              applicationNo,
-              academicYearId: input.academicYearId,
-              classId: input.classId,
-              firstName: input.firstName,
-              lastName: input.lastName,
-              dob: input.dob,
-              guardianName: input.guardianName,
-              guardianPhone: input.guardianPhone,
-              appliedOn,
-              status: initialStatus,
-              needsTransport: input.needsTransport ?? false,
-              needsHostel: input.needsHostel ?? false,
-              feePaid: input.feePaid ?? false,
-              source: input.source,
-            })
-            .returning();
+              admissionId: createdRow.id,
+              fromStatus: null,
+              toStatus: initialStatus,
+              note: input.note ?? null,
+              changedBy: actor.id,
+            });
 
-          await tx.insert(admissionStatusHistory).values({
-            tenantId: tenant.id,
-            admissionId: createdRow.id,
-            fromStatus: null,
-            toStatus: initialStatus,
-            note: input.note ?? null,
-            changedBy: actor.id,
+            const history = await loadHistory(tenant.id, createdRow.id, tx2);
+            return { ...toAdmission(createdRow), history };
           });
-
-          const history = await loadHistory(tenant.id, createdRow.id, tx);
-          return { ...toAdmission(createdRow), history };
         } catch (e) {
           if (!isUniqueViolation(e) || input.applicationNo) throw e;
         }
