@@ -34,6 +34,26 @@ git push
 #    that skips having one. The branch itself should just not live long.)
 ```
 
+## Where to actually do this on GitHub
+
+1. Push your branch (`git push origin your-branch-name`). GitHub prints a direct link to open
+   the PR right there in the terminal output - click it, or:
+2. Go to **github.com/CreatixHub/backend** → you'll see a yellow banner *"your-branch-name had
+   recent pushes"* with a **"Compare & pull request"** button. Click it.
+   (No banner? Go to the **Pull requests** tab → **New pull request** → pick your branch as
+   "compare" and `main` as "base".)
+3. Fill in a title/description, click **Create pull request**.
+4. On the PR page, scroll down - you'll see a **Checks** section. That's CI running
+   (`.github/workflows/ci.yml`, shows as "Backend tests"). Wait for the green check; a red ❌
+   means something failed - click **Details** next to it to see the actual error log.
+5. Ask a teammate to review (top-right **Reviewers** box, or just ping them). Once you have
+   1 approval and the check is green, the **Merge pull request** button turns active - click it.
+   If either is missing, the button stays disabled/greyed out - that's the branch protection
+   working as intended, not a bug.
+6. All of this - every PR, every check run, every review - is also visible any time at
+   **github.com/CreatixHub/backend/pulls** (open PRs) and
+   **github.com/CreatixHub/backend/actions** (every CI run, past and present).
+
 ## What's required before a PR can merge
 
 `main` is protected. A PR cannot merge until:

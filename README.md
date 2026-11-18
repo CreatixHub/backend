@@ -6,6 +6,10 @@ Multi-school ERP backend. Node.js 22 + Express 5 + TypeScript + Drizzle ORM + Po
 checks are already built and working. If you're new to this stack, read this file top to bottom before
 touching code; it explains the *why*, not just the *how*.
 
+**Working on a change?** See [`CONTRIBUTING.md`](./CONTRIBUTING.md) first — short-lived branches off
+`main`, how to open a PR, and where to watch CI. `main` is protected: a PR needs a passing check and
+one approval before it can merge.
+
 ## 1. What this backend actually does
 
 One person signs up once. They can belong to several schools ("organizations" in the code) with a
