@@ -81,6 +81,8 @@ const admissionFields = {
   feePaymentMethod: text(40).nullish(),
 
   source: z.enum(ADMISSION_SOURCES),
+
+  photoFileId: id.nullish(),
 };
 
 export const listAdmissionsSchema = z

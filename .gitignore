@@ -22,3 +22,7 @@ resp.json
 
 # the top-level reference-material folder only (not any nested "docs" dir, e.g. src/docs/ is real app code)
 /docs/
+
+uploads/
+
+uploads/

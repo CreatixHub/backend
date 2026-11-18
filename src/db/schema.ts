@@ -90,6 +90,32 @@ export const users = pgTable(
   ],
 );
 
+// Uploaded files (student photos, documents...). The bytes live on disk under UPLOAD_DIR; this row says where.
+export const files = pgTable(
+  "files",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    purpose: text("purpose").notNull(), // admission_photo | student_photo
+    originalName: text("original_name").notNull(),
+    mimeType: text("mime_type").notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    storageKey: text("storage_key").notNull(), // path relative to UPLOAD_DIR
+    uploadedBy: plainBigint("uploaded_by").references((): AnyPgColumn => users.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    createdAt: createdAt(),
+    deletedAt: ts("deleted_at"),
+  },
+  (t) => [
+    uniqueIndex("files_storage_key_key").on(t.storageKey),
+    index("files_tenant_id_purpose_idx").on(t.tenantId, t.purpose),
+  ],
+);
+
 export const memberships = pgTable(
   "memberships",
   {
@@ -1165,6 +1191,10 @@ export const admissions = pgTable(
     feePaidOn: date("fee_paid_on"),
     feePaymentMethod: text("fee_payment_method"),
     source: text("source").notNull(), // walk_in | website | referral | agent | event | other
+    photoFileId: plainBigint("photo_file_id").references((): AnyPgColumn => files.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
     studentId: plainBigint("student_id").references(() => students.id, {
       onDelete: "set null",
       onUpdate: "cascade",
@@ -2077,5 +2107,3 @@ export const exitPassesRelations = relations(exitPasses, ({ one }) => ({
   requestedByStaff: one(staff, { fields: [exitPasses.requestedByStaffId], references: [staff.id] }),
   approvedByUser: one(users, { fields: [exitPasses.approvedBy], references: [users.id] }),
 }));
-
-

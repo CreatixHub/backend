@@ -99,6 +99,13 @@
       "when": 1794478702845,
       "tag": "0013_modern_mister_sinister",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1795000755101,
+      "tag": "0014_silent_hitman",
+      "breakpoints": true
     }
   ]
 }

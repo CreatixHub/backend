@@ -5,6 +5,7 @@ import {
   admissions,
   admissionStatusHistory,
   classes,
+  files,
   guardians,
   membershipRoles,
   memberships,
@@ -103,6 +104,15 @@ async function assertClass(tenantId: bigint, classId: bigint) {
     .where(and(eq(classes.id, classId), eq(classes.tenantId, tenantId), isNull(classes.deletedAt)))
     .limit(1);
   if (!row) throw new HttpError(400, 'Class not found in this school');
+}
+
+async function assertPhotoFile(tenantId: bigint, fileId: bigint) {
+  const [row] = await db
+    .select({ id: files.id })
+    .from(files)
+    .where(and(eq(files.id, fileId), eq(files.tenantId, tenantId), isNull(files.deletedAt)))
+    .limit(1);
+  if (!row) throw new HttpError(400, 'Photo file not found in this school');
 }
 
 async function assertStaff(tenantId: bigint, staffId: bigint) {
@@ -268,6 +278,7 @@ export async function getAdmissionHistory(tenant: TenantContext, id: bigint) {
 export async function createAdmission(tenant: TenantContext, actor: AuthUser, input: CreateAdmissionInput) {
   await assertClass(tenant.id, input.classId);
   if (input.assignedToStaffId) await assertStaff(tenant.id, input.assignedToStaffId);
+  if (input.photoFileId) await assertPhotoFile(tenant.id, input.photoFileId);
 
   const appliedOn = input.appliedOn ?? todayStr();
   const initialStatus = input.status ?? 'applied';
@@ -341,6 +352,7 @@ export async function updateAdmission(
   const existing = await loadAdmission(tenant.id, id);
   if (input.classId) await assertClass(tenant.id, input.classId);
   if (input.assignedToStaffId) await assertStaff(tenant.id, input.assignedToStaffId);
+  if (input.photoFileId) await assertPhotoFile(tenant.id, input.photoFileId);
 
   const feePaid = input.feePaid !== undefined ? input.feePaid : existing.feePaid;
   const feePaidOn = input.feePaidOn !== undefined ? input.feePaidOn : existing.feePaidOn;
@@ -451,6 +463,7 @@ export async function changeAdmissionStatus(
                   cityId: existing.cityId,
                   postalCode: existing.postalCode,
                   studentHouseId: input.studentHouseId ?? null,
+                  photoFileId: existing.photoFileId,
                   status: 'active',
                   admittedOn,
                 })

@@ -39,6 +39,7 @@ import {
   assetsRouter,
 } from "./modules/assets/assets.routes";
 import { admissionsRouter } from "./modules/admissions/admissions.routes";
+import { filesRouter } from "./modules/files/files.routes";
 import { guardiansRouter, studentHousesRouter, studentsRouter } from "./modules/students/students.routes";
 import {
   attendanceRulesRouter,
@@ -125,6 +126,7 @@ export function createApp() {
   app.use("/api/asset-allocations", assetAllocationsRouter);
   app.use("/api/asset-maintenance", assetMaintenanceRouter);
   app.use("/api/admissions", admissionsRouter);
+  app.use("/api/files", filesRouter);
   app.use("/api/students", studentsRouter);
   app.use("/api/guardians", guardiansRouter);
   app.use("/api/student-houses", studentHousesRouter);

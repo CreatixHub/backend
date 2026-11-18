@@ -2,6 +2,7 @@ import { and, asc, count, desc, eq, getTableColumns, ilike, inArray, isNull, ne,
 import { db } from '../../db';
 import {
   admissions,
+  classes,
   guardians,
   memberships,
   staff,
@@ -456,10 +457,14 @@ export async function listStudents(tenant: TenantContext, actor: AuthUser, q: Li
         houseName: studentHouses.name,
         primaryGuardianName: guardians.fullName,
         primaryGuardianPhone: guardians.phone,
+        className: classes.name,
+        gradeLevel: classes.gradeLevel,
       })
       .from(students)
       .leftJoin(studentHouses, eq(students.studentHouseId, studentHouses.id))
       .leftJoin(guardians, eq(students.primaryGuardianId, guardians.id))
+      .leftJoin(admissions, and(eq(admissions.studentId, students.id), isNull(admissions.deletedAt)))
+      .leftJoin(classes, eq(classes.id, admissions.classId))
       .where(where)
       .orderBy(asc(students.admissionNo), asc(students.id))
       .offset((q.page - 1) * q.limit)
