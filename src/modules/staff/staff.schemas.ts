@@ -85,7 +85,21 @@ export const listStaffSchema = z
   })
   .strict();
 
-export const createStaffSchema = z.object(staffFields).strict();
+// createLogin: make a sign-in for this person.
+// Default when omitted: yes for teaching staff, no for non-teaching staff.
+// The first password is the date of birth (DD-MM-YYYY), so dob is required when a login is created.
+//
+// assignments: the classes and subjects this teacher takes (one entry per class + subject pair).
+// A class is stored per section, so the teacher is saved to section_teachers for EVERY section of
+// the class, for academicYearId (required when assignments are sent).
+export const createStaffSchema = z
+  .object({
+    ...staffFields,
+    createLogin: z.boolean().optional(),
+    academicYearId: id.optional(),
+    assignments: z.array(z.object({ classId: id, subjectId: id }).strict()).max(40).optional(),
+  })
+  .strict();
 
 export const updateStaffSchema = z
   .object(staffFields)

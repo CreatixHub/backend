@@ -1,6 +1,6 @@
 import * as argon2 from "argon2";
 import { isIP } from "node:net";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { db } from "../../db";
 import { memberships, organizations, refreshTokens, users } from "../../db/schema";
 import { HttpError } from "../../lib/errors";
@@ -104,7 +104,10 @@ export async function login(input: LoginInput, meta: ClientMeta): Promise<AuthRe
   const invalid = () => new HttpError(401, 'Invalid email or password');
 
   // find the person by email or username
-  const identifierCond = input.email ? eq(users.email, input.email) : eq(users.username, input.username!);
+  // Usernames can be a teacher ID like "AM-101", so they are matched case-insensitively.
+  const identifierCond = input.email
+    ? eq(users.email, input.email)
+    : sql`lower(${users.username}) = ${input.username!.trim().toLowerCase()}`;
   const [user] = await db
     .select()
     .from(users)

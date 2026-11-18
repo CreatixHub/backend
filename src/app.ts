@@ -59,6 +59,8 @@ import {
 } from "./modules/finance/finance.routes";
 import { expenseCategoriesRouter, expensesRouter } from "./modules/expenses/expenses.routes";
 import { exitPassesRouter } from "./modules/gatepass/gatepass.routes";
+import { reportsRouter } from "./modules/reports/reports.routes";
+
 // Building the app in a function (instead of starting the server here) lets tests use it too.
 // The ORDER of the lines below is the security design: Express runs them top to bottom.
 export function createApp() {
@@ -97,7 +99,7 @@ export function createApp() {
 
   // ---- UNCOMMENT each line when its chapter's code is finished (and add the imports at the top) ----
   app.use("/api/auth", publicAuthRouter); // signup, login, refresh, logout  (public)
-app.use("/api", authenticate); // THE DIVIDING LINE: everything below needs a signed-in person
+  app.use("/api", authenticate); // THE DIVIDING LINE: everything below needs a signed-in person
   app.use("/api/auth", privateAuthRouter); // me, switch-organization
   app.use("/api/organizations", organizationsRouter);
   app.use("/api/members", membersRouter);
@@ -106,20 +108,20 @@ app.use("/api", authenticate); // THE DIVIDING LINE: everything below needs a si
   app.use("/api/staff", staffRouter);
   app.use("/api/subjects", subjectsRouter);
   app.use("/api/classes", classesRouter);
-app.use("/api/sections", sectionsRouter);
-app.use("/api/time-slots", timeSlotsRouter);
-app.use("/api/section-teachers", sectionTeachersRouter);
-app.use("/api/timetable", timetableRouter);
-app.use("/api/homework", homeworkRouter);
-app.use("/api/homework-submissions", homeworkSubmissionsRouter);
-app.use("/api/vehicles", vehiclesRouter);
-app.use("/api/drivers", driversRouter);
-app.use("/api/transport-routes", transportRoutesRouter);
-app.use("/api/pickup-points", pickupPointsRouter);
-app.use("/api/route-schedules", routeSchedulesRouter);
-app.use("/api/transport-assignments", transportAssignmentsRouter);
-app.use("/api/asset-categories", assetCategoriesRouter);
-app.use("/api/assets", assetsRouter);
+  app.use("/api/sections", sectionsRouter);
+  app.use("/api/time-slots", timeSlotsRouter);
+  app.use("/api/section-teachers", sectionTeachersRouter);
+  app.use("/api/timetable", timetableRouter);
+  app.use("/api/homework", homeworkRouter);
+  app.use("/api/homework-submissions", homeworkSubmissionsRouter);
+  app.use("/api/vehicles", vehiclesRouter);
+  app.use("/api/drivers", driversRouter);
+  app.use("/api/transport-routes", transportRoutesRouter);
+  app.use("/api/pickup-points", pickupPointsRouter);
+  app.use("/api/route-schedules", routeSchedulesRouter);
+  app.use("/api/transport-assignments", transportAssignmentsRouter);
+  app.use("/api/asset-categories", assetCategoriesRouter);
+  app.use("/api/assets", assetsRouter);
   app.use("/api/asset-allocations", assetAllocationsRouter);
   app.use("/api/asset-maintenance", assetMaintenanceRouter);
   app.use("/api/admissions", admissionsRouter);
@@ -142,6 +144,7 @@ app.use("/api/assets", assetsRouter);
   app.use("/api/expense-categories", expenseCategoriesRouter);
   app.use("/api/expenses", expensesRouter);
   app.use("/api/exit-passes", exitPassesRouter);
+  app.use("/api/reports", reportsRouter);
 
   app.use((_req, _res, next) => next(new HttpError(404, "Not found"))); // nothing matched
   app.use(errorHandler); // must be the very last line

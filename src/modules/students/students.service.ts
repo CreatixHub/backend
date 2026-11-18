@@ -507,6 +507,41 @@ export async function getStudent(tenant: TenantContext, actor: AuthUser, id: big
   };
 }
 
+// The signed-in student's own record + guardians + house.
+// No permission check: the lookup is tied to the caller's own login (students.userId).
+export async function getMyStudent(tenant: TenantContext, actor: AuthUser) {
+  const [row] = await db
+    .select({
+      ...getTableColumns(students),
+      houseName: studentHouses.name,
+      houseColor: studentHouses.color,
+    })
+    .from(students)
+    .leftJoin(studentHouses, eq(students.studentHouseId, studentHouses.id))
+    .where(and(eq(students.tenantId, tenant.id), eq(students.userId, actor.id), isNull(students.deletedAt)))
+    .limit(1);
+  if (!row) throw new HttpError(404, 'No student record is linked to this login');
+
+  const guardianRows = await db
+    .select({
+      fullName: guardians.fullName,
+      relation: guardians.relation,
+      isPrimary: studentGuardians.isPrimary,
+    })
+    .from(studentGuardians)
+    .innerJoin(guardians, eq(studentGuardians.guardianId, guardians.id))
+    .where(
+      and(
+        eq(studentGuardians.tenantId, tenant.id),
+        eq(studentGuardians.studentId, row.id),
+        isNull(guardians.deletedAt),
+      ),
+    )
+    .orderBy(desc(studentGuardians.isPrimary), asc(guardians.fullName));
+
+  return { ...toRow(row), guardians: guardianRows };
+}
+
 export async function createStudent(tenant: TenantContext, _actor: AuthUser, input: CreateStudentInput) {
   if (input.userId) await assertUserRelation(tenant.id, input.userId);
   if (input.admissionId) await assertAdmissionRelation(tenant.id, input.admissionId);
@@ -550,53 +585,56 @@ export async function createStudent(tenant: TenantContext, _actor: AuthUser, inp
       for (let attempt = 0; attempt < 5; attempt++) {
         const admissionNo = input.admissionNo ?? (await nextAdmissionNo(tx, tenant.id, year, attempt));
         try {
-          const [createdRow] = await tx
-            .insert(students)
-            .values({
-              ...(studentData as Partial<StudentInsert>),
-              tenantId: tenant.id,
-              admissionNo,
-              firstName: input.firstName,
-              lastName: input.lastName,
-              fullName: input.fullName ?? joinName(input.firstName, input.lastName),
-              dob: input.dob,
-              primaryGuardianId,
-              status,
-              admittedOn,
-            })
-            .returning();
-
-          if (inlineGuardians.length > 0) {
-            await tx.insert(studentGuardians).values(
-              inlineGuardians.map((g) => ({
-                studentId: createdRow.id,
-                guardianId: g.guardianId,
+          // Savepoint per attempt: a unique violation must not abort the whole transaction.
+          return await tx.transaction(async (sp) => {
+            const [createdRow] = await sp
+              .insert(students)
+              .values({
+                ...(studentData as Partial<StudentInsert>),
                 tenantId: tenant.id,
-                isPrimary: g.isPrimary,
-                canPickUp: g.canPickUp,
-              })),
-            );
-          }
+                admissionNo,
+                firstName: input.firstName,
+                lastName: input.lastName,
+                fullName: input.fullName ?? joinName(input.firstName, input.lastName),
+                dob: input.dob,
+                primaryGuardianId,
+                status,
+                admittedOn,
+              })
+              .returning();
 
-          if (primaryGuardianId && !inlineGuardians.some((g) => g.guardianId === primaryGuardianId)) {
-            await tx.insert(studentGuardians).values({
-              studentId: createdRow.id,
-              guardianId: primaryGuardianId,
-              tenantId: tenant.id,
-              isPrimary: true,
-              canPickUp: true,
-            });
-          }
+            if (inlineGuardians.length > 0) {
+              await sp.insert(studentGuardians).values(
+                inlineGuardians.map((g) => ({
+                  studentId: createdRow.id,
+                  guardianId: g.guardianId,
+                  tenantId: tenant.id,
+                  isPrimary: g.isPrimary,
+                  canPickUp: g.canPickUp,
+                })),
+              );
+            }
 
-          if (input.admissionId) {
-            await tx
-              .update(admissions)
-              .set({ studentId: createdRow.id })
-              .where(and(eq(admissions.id, input.admissionId), eq(admissions.tenantId, tenant.id), isNull(admissions.studentId)));
-          }
+            if (primaryGuardianId && !inlineGuardians.some((g) => g.guardianId === primaryGuardianId)) {
+              await sp.insert(studentGuardians).values({
+                studentId: createdRow.id,
+                guardianId: primaryGuardianId,
+                tenantId: tenant.id,
+                isPrimary: true,
+                canPickUp: true,
+              });
+            }
 
-          const linkedGuardians = await loadStudentGuardiansList(tenant.id, createdRow.id, tx);
-          return { ...toRow(createdRow), guardians: linkedGuardians.map(toRow) };
+            if (input.admissionId) {
+              await sp
+                .update(admissions)
+                .set({ studentId: createdRow.id })
+                .where(and(eq(admissions.id, input.admissionId), eq(admissions.tenantId, tenant.id), isNull(admissions.studentId)));
+            }
+
+            const linkedGuardians = await loadStudentGuardiansList(tenant.id, createdRow.id, sp);
+            return { ...toRow(createdRow), guardians: linkedGuardians.map(toRow) };
+          });
         } catch (e) {
           if (!isUniqueViolation(e) || input.admissionNo) throw e;
         }

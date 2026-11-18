@@ -5,12 +5,45 @@ import { currentTenant, currentUser } from '../../middleware/authenticate';
 import { requirePermission } from '../../middleware/requirePermission';
 import { createStaffSchema, listStaffSchema, updateStaffSchema } from './staff.schemas';
 import * as staffService from './staff.service';
+import * as me from './staff.me';
+import { addAssignments, addAssignmentsSchema, removeAssignment } from './staff.assignAdmin';
 
 export const staffRouter = Router();
 
 staffRouter.get('/', requirePermission('staff.view'), async (req, res) => {
   const result = await staffService.listStaff(currentTenant(req), listStaffSchema.parse(req.query));
   ok(res, result.rows, result.meta);
+});
+
+// ---- the signed-in staff member's own data (no permission needed; tied to their own login) ----
+// These must stay ABOVE '/:id', otherwise "me" would be treated as an id.
+staffRouter.get('/me', async (req, res) => {
+  ok(res, await staffService.getMyStaff(currentTenant(req), currentUser(req)));
+});
+
+staffRouter.get('/me/sections', async (req, res) => {
+  ok(res, await me.getMySections(currentTenant(req), currentUser(req)));
+});
+
+staffRouter.get('/me/timetable', async (req, res) => {
+  ok(res, await me.getMyTimetable(currentTenant(req), currentUser(req)));
+});
+
+staffRouter.get('/me/assignments', async (req, res) => {
+  ok(res, await me.getMyAssignments(currentTenant(req), currentUser(req)));
+});
+
+staffRouter.get('/me/homework', async (req, res) => {
+  ok(res, await me.getMyHomework(currentTenant(req), currentUser(req)));
+});
+
+// ---- any teacher, by id (admin side) ----
+staffRouter.get('/:id/assignments', requirePermission('staff.view'), async (req, res) => {
+  ok(res, await me.getStaffAssignments(currentTenant(req), parseId(req.params.id)));
+});
+
+staffRouter.get('/:id/timetable', requirePermission('staff.view'), async (req, res) => {
+  ok(res, await me.getStaffTimetable(currentTenant(req), parseId(req.params.id)));
 });
 
 staffRouter.get('/:id', requirePermission('staff.view'), async (req, res) => {
@@ -24,6 +57,24 @@ staffRouter.post('/', requirePermission('staff.create'), async (req, res) => {
 staffRouter.patch('/:id', requirePermission('staff.edit'), async (req, res) => {
   const input = updateStaffSchema.parse(req.body);
   ok(res, await staffService.updateStaff(currentTenant(req), currentUser(req), parseId(req.params.id), input));
+});
+
+// Add classes + subjects to an existing teacher.
+staffRouter.post('/:id/assignments', requirePermission('staff.edit'), async (req, res) => {
+  const input = addAssignmentsSchema.parse(req.body);
+  await addAssignments(currentTenant(req), parseId(req.params.id), input);
+  ok(res, { saved: input.assignments.length });
+});
+
+// Remove one subject of one class (all its sections) from a teacher.
+staffRouter.delete('/:id/assignments/:classId/:subjectId', requirePermission('staff.edit'), async (req, res) => {
+  await removeAssignment(
+    currentTenant(req),
+    parseId(req.params.id),
+    parseId(req.params.classId),
+    parseId(req.params.subjectId),
+  );
+  noContent(res);
 });
 
 staffRouter.delete('/:id', requirePermission('staff.delete'), async (req, res) => {

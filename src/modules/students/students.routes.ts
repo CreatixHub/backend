@@ -30,6 +30,12 @@ studentsRouter.get('/', requirePermission('students.view'), async (req, res) => 
   ok(res, result.rows, result.meta);
 });
 
+// The signed-in student's own record (no permission needed; scoped to their own login).
+// Must stay ABOVE '/:id', otherwise "me" would be treated as an id.
+studentsRouter.get('/me', async (req, res) => {
+  ok(res, await svc.getMyStudent(currentTenant(req), currentUser(req)));
+});
+
 studentsRouter.get('/:id', requirePermission('students.view'), async (req, res) => {
   ok(res, await svc.getStudent(currentTenant(req), currentUser(req), parseId(req.params.id)));
 });
