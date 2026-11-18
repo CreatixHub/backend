@@ -13,6 +13,7 @@ async function setupSchool(tag: string) {
     staffType: 'teaching',
     employmentType: 'full_time',
     joinedOn: '2026-06-01',
+    createLogin: false, // this test only needs a staff row to attach students/attendance to, not a login
   });
 
   return { agent, slug, staffId: stf.body.data.id as string };

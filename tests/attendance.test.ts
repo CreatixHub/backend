@@ -25,6 +25,7 @@ describe("Task 1 — Attendance, Holidays & Leaves", () => {
       firstName: "Asha",
       lastName: "Menon",
       joinedOn: "2026-06-01",
+      createLogin: false, // this test only needs a staff row for attendance, not a login
     });
     expect(staffRes.status).toBe(201);
     const staffId = staffRes.body.data.id as string;

@@ -1,11 +1,24 @@
-import { and, asc, count, eq, ilike, isNull, ne, or } from 'drizzle-orm';
+import * as argon2 from 'argon2';
+import { and, asc, count, eq, ilike, inArray, isNull, ne, or } from 'drizzle-orm';
 import { db } from '../../db';
-import { memberships, staff } from '../../db/schema';
+import {
+  classes,
+  membershipRoles,
+  memberships,
+  roles,
+  sectionTeachers,
+  sections,
+  staff,
+  subjects,
+  users,
+} from '../../db/schema';
 import { encryptField } from '../../lib/crypto';
 import { HttpError } from '../../lib/errors';
 import type { TenantContext } from '../../lib/tenant';
 import type { AuthUser } from '../../middleware/authenticate';
 import type { CreateStaffInput, ListStaffInput, UpdateStaffInput } from './staff.schemas';
+import { saveAssignments } from './staff.assignments';
+import { ensureClassSubjects, ensureDefaultSections } from './staff.assignAdmin';
 
 // RULES (same as members): every query has tenantId = tenant.id, and soft-deleted rows (deletedAt set) are invisible.
 
@@ -33,6 +46,12 @@ const toStaff = (s: StaffRow) => ({
 
 const joinName = (first: string | null | undefined, last: string | null | undefined) =>
   [first, last].filter(Boolean).join(' ');
+
+// DD-MM-YYYY (10 characters, so it passes the 10-character password rule)
+const dobPassword = (dob: string) => {
+  const [y, m, d] = dob.split('-');
+  return `${d}-${m}-${y}`;
+};
 
 async function loadStaff(tenantId: bigint, id: bigint): Promise<StaffRow> {
   const [row] = await db
@@ -129,36 +148,178 @@ export async function listStaff(
     db.select({ total: count() }).from(staff).where(where),
   ]);
 
-  return { rows: rows.map(toStaff), meta: { page: q.page, limit: q.limit, total, pages: Math.ceil(total / q.limit) } };
+  // What each teacher on this page really teaches (from section_teachers).
+  const ids = rows.map((r) => r.id);
+  const mapped =
+    ids.length === 0
+      ? []
+      : await db
+          .select({
+            teacherId: sectionTeachers.teacherId,
+            className: classes.name,
+            sectionName: sections.name,
+            subjectName: subjects.name,
+          })
+          .from(sectionTeachers)
+          .innerJoin(sections, eq(sections.id, sectionTeachers.sectionId))
+          .innerJoin(classes, eq(classes.id, sections.classId))
+          .innerJoin(subjects, eq(subjects.id, sectionTeachers.subjectId))
+          .where(and(eq(sectionTeachers.tenantId, tenant.id), inArray(sectionTeachers.teacherId, ids)));
+
+  const teaching = new Map<string, { classes: Set<string>; sections: Set<string>; subjects: Set<string> }>();
+  for (const m of mapped) {
+    const key = String(m.teacherId);
+    const entry = teaching.get(key) ?? {
+      classes: new Set<string>(),
+      sections: new Set<string>(),
+      subjects: new Set<string>(),
+    };
+    entry.classes.add(m.className);
+    entry.sections.add(`${m.className} - ${m.sectionName}`);
+    entry.subjects.add(m.subjectName);
+    teaching.set(key, entry);
+  }
+
+  return {
+    rows: rows.map((r) => {
+      const t = teaching.get(String(r.id));
+      return {
+        ...toStaff(r),
+        teaching: {
+          classes: t ? [...t.classes] : [],
+          sections: t ? [...t.sections] : [],
+          subjects: t ? [...t.subjects] : [],
+        },
+      };
+    }),
+    meta: { page: q.page, limit: q.limit, total, pages: Math.ceil(total / q.limit) },
+  };
 }
 
 export async function getStaff(tenant: TenantContext, id: bigint): Promise<unknown> {
   return toStaff(await loadStaff(tenant.id, id));
 }
 
+// The signed-in staff member's own record. No permission check: the lookup is tied to the caller's own login.
+export async function getMyStaff(tenant: TenantContext, actor: AuthUser): Promise<unknown> {
+  const [row] = await db
+    .select()
+    .from(staff)
+    .where(and(eq(staff.tenantId, tenant.id), eq(staff.userId, actor.id), isNull(staff.deletedAt)))
+    .limit(1);
+  if (!row) throw new HttpError(404, 'No staff record is linked to this login');
+  return toStaff(row);
+}
+
 export async function createStaff(tenant: TenantContext, _actor: AuthUser, input: CreateStaffInput): Promise<unknown> {
-  await assertRelations(tenant.id, input.userId, input.reportsToId);
-  const columns = toColumns(input);
+  // assignments + academicYearId are saved to section_teachers, not to the staff table
+  const { createLogin, assignments, academicYearId, ...staffInput } = input;
+  if (assignments && assignments.length > 0 && !academicYearId) {
+    throw new HttpError(400, 'academicYearId is required when assigning classes and subjects');
+  }
+  await assertRelations(tenant.id, staffInput.userId, staffInput.reportsToId);
+  const columns = toColumns(staffInput);
+
+  // A login is made for teaching staff by default (unless an existing login is being linked or it is switched off).
+  const wantsLogin = !staffInput.userId && (createLogin ?? staffInput.staffType === 'teaching');
+  if (wantsLogin && !staffInput.dob) {
+    throw new HttpError(400, 'Validation failed', [
+      { field: 'dob', message: 'Date of birth is required to create a login (it is the first password)' },
+    ]);
+  }
 
   for (let attempt = 0; attempt < 3; attempt++) {
-    const employeeNo = input.employeeNo ?? (await nextEmployeeNo(tenant.id, attempt));
+    const employeeNo = staffInput.employeeNo ?? (await nextEmployeeNo(tenant.id, attempt));
     try {
-      const [row] = await db
-        .insert(staff)
-        .values({
-          ...columns,
-          tenantId: tenant.id,
-          employeeNo,
-          fullName: joinName(input.firstName, input.lastName),
-          staffType: input.staffType,
-          employmentType: input.employmentType,
-          joinedOn: input.joinedOn,
-        })
-        .returning();
-      return toStaff(row);
+      return await db.transaction(async (tx) => {
+        let loginUserId: bigint | null = null;
+        let login: { username: string; password: string } | null = null;
+
+        if (wantsLogin) {
+          const roleCode = staffInput.staffType === 'teaching' ? 'teacher' : 'staff';
+          const [role] = await tx
+            .select({ id: roles.id })
+            .from(roles)
+            .where(and(eq(roles.tenantId, tenant.id), eq(roles.code, roleCode)))
+            .limit(1);
+          if (!role) throw new HttpError(400, `The "${roleCode}" role is missing in this school`);
+
+          // username = phone; falls back to the employee number if empty or already taken
+          const wantedPhone = staffInput.phone?.trim() || null;
+          const wantedEmail = staffInput.email?.trim() || null;
+          const [phoneAsUsername] = wantedPhone
+            ? await tx.select({ id: users.id }).from(users).where(eq(users.username, wantedPhone)).limit(1)
+            : [];
+          const username = wantedPhone && !phoneAsUsername ? wantedPhone : employeeNo;
+
+          // store phone/email on the login only when no other user already has them
+          const [phoneTaken] = wantedPhone
+            ? await tx.select({ id: users.id }).from(users).where(eq(users.phone, wantedPhone)).limit(1)
+            : [];
+          const [emailTaken] = wantedEmail
+            ? await tx.select({ id: users.id }).from(users).where(eq(users.email, wantedEmail)).limit(1)
+            : [];
+
+          const [user] = await tx
+            .insert(users)
+            .values({
+              username,
+              phone: phoneTaken ? null : wantedPhone,
+              email: emailTaken ? null : wantedEmail,
+              fullName: joinName(staffInput.firstName, staffInput.lastName),
+              passwordHash: await argon2.hash(dobPassword(staffInput.dob!)),
+              userType: 'staff',
+              mustChangePassword: true,
+            })
+            .returning({ id: users.id });
+
+          const [membership] = await tx
+            .insert(memberships)
+            .values({ tenantId: tenant.id, userId: user.id })
+            .returning({ id: memberships.id });
+
+          await tx.insert(membershipRoles).values({
+            membershipId: membership.id,
+            roleId: role.id,
+            tenantId: tenant.id,
+          });
+
+          loginUserId = user.id;
+          login = { username, password: 'Date of birth (DD-MM-YYYY)' };
+        }
+
+        const [row] = await tx
+          .insert(staff)
+          .values({
+            ...columns,
+            tenantId: tenant.id,
+            employeeNo,
+            userId: loginUserId ?? staffInput.userId ?? null,
+            fullName: joinName(staffInput.firstName, staffInput.lastName),
+            staffType: staffInput.staffType,
+            employmentType: staffInput.employmentType,
+            joinedOn: staffInput.joinedOn,
+          })
+          .returning();
+
+        // the classes and subjects this teacher takes (all-or-nothing with the teacher and login)
+        if (assignments && assignments.length > 0) {
+          // a class with no section gets a default section "A" first
+          await ensureDefaultSections(
+            tx,
+            tenant.id,
+            assignments.map((a) => a.classId),
+          );
+          // the timetable only accepts subjects registered for the class
+          await ensureClassSubjects(tx, tenant.id, assignments);
+          await saveAssignments(tx, tenant.id, row.id, academicYearId!, assignments);
+        }
+
+        return { ...toStaff(row), ...(login ? { login } : {}) };
+      });
     } catch (e) {
       if (!isUniqueViolation(e)) throw e;
-      if (input.employeeNo) throw new HttpError(409, 'That employee number is already used in this school');
+      if (staffInput.employeeNo) throw new HttpError(409, 'That employee number is already used in this school');
       // a generated number collided with another request at the same moment: try the next one
     }
   }

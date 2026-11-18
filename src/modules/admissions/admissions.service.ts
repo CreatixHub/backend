@@ -1,3 +1,4 @@
+import * as argon2 from 'argon2';
 import { and, asc, count, desc, eq, getTableColumns, ilike, isNull, or, sql } from 'drizzle-orm';
 import { db } from '../../db';
 import {
@@ -5,6 +6,9 @@ import {
   admissionStatusHistory,
   classes,
   guardians,
+  membershipRoles,
+  memberships,
+  roles,
   staff,
   studentGuardians,
   studentHouses,
@@ -33,6 +37,30 @@ const toRow = (row: object) => Object.fromEntries(Object.entries(row).filter(([k
 
 const todayStr = () => new Date().toISOString().slice(0, 10);
 const joinName = (first: string, last: string) => [first, last].filter(Boolean).join(' ');
+// DD-MM-YYYY (10 chars, so it passes the 10-character password rule)
+const dobPassword = (dob: string) => {
+  const [y, m, d] = dob.split('-');
+  return `${d}-${m}-${y}`;
+};
+
+// Which unique constraint was violated (Drizzle wraps the pg error in `cause`).
+const constraintOf = (e: unknown): string | undefined => {
+  const err = e as { cause?: { constraint?: string }; constraint?: string } | null;
+  return err?.cause?.constraint ?? err?.constraint;
+};
+
+// Turns a unique violation into a message that says what actually clashed.
+const conflictMessage = (e: unknown): string => {
+  const c = (constraintOf(e) ?? '').toLowerCase();
+  if (c.includes('username')) return 'A login with this username already exists';
+  if (c.includes('phone')) return 'A login with this phone number already exists';
+  if (c.includes('email')) return 'A login with this email already exists';
+  if (c.includes('admission_no') || c.includes('admissionno')) return 'That student admission number is already used in this school';
+  if (c.includes('admission_id') || c.includes('admissionid')) return 'This admission already has a student record';
+  if (c.includes('user_id') || c.includes('userid')) return 'That login is already linked to another student';
+  return 'Admission number or student link already exists';
+};
+
 const pageMeta = (page: number, limit: number, total: number) => ({
   page,
   limit,
@@ -48,6 +76,24 @@ async function loadAdmission(tenantId: bigint, id: bigint, runner: Tx | typeof d
     .limit(1);
   if (!row) throw new HttpError(404, 'Admission not found');
   return row;
+}
+
+// username = the student's phone; falls back to the admission number if empty or already taken.
+// admissionNo is only unique PER TENANT, but users.username is unique GLOBALLY across every school -
+// two different schools' first phone-less student both land on e.g. "STU-2026-0001", so the fallback
+// itself needs its own taken-check (with a numeric suffix) rather than being assumed free.
+async function pickUsername(tx: Tx, phone: string | null, admissionNo: string): Promise<string> {
+  const wanted = phone?.trim();
+  if (wanted) {
+    const [taken] = await tx.select({ id: users.id }).from(users).where(eq(users.username, wanted)).limit(1);
+    if (!taken) return wanted;
+  }
+  for (let suffix = 0; suffix < 20; suffix++) {
+    const candidate = suffix === 0 ? admissionNo : `${admissionNo}-${suffix + 1}`;
+    const [taken] = await tx.select({ id: users.id }).from(users).where(eq(users.username, candidate)).limit(1);
+    if (!taken) return candidate;
+  }
+  throw new HttpError(409, 'Could not generate a username, please try again');
 }
 
 async function assertClass(tenantId: bigint, classId: bigint) {
@@ -77,6 +123,8 @@ async function assertHouse(tenantId: bigint, houseId: bigint) {
   if (!row) throw new HttpError(400, 'Student house not found in this school');
 }
 
+// NOTE the ::int cast after the position: without it Postgres may treat the
+// parameter as a text pattern and the "highest number so far" comes back wrong.
 async function nextApplicationNo(tx: Tx, tenantId: bigint, year: string, offset: number): Promise<string> {
   const prefix = `APP-${year}-`;
   const [r] = await tx
@@ -272,6 +320,7 @@ export async function createAdmission(tenant: TenantContext, actor: AuthUser, in
           });
         } catch (e) {
           if (!isUniqueViolation(e) || input.applicationNo) throw e;
+          console.error('createAdmission: unique violation, constraint =', constraintOf(e), ', applicationNo =', applicationNo);
         }
       }
       throw new HttpError(409, 'Could not generate an application number, please try again');
@@ -341,6 +390,7 @@ export async function changeAdmissionStatus(
   try {
     return await db.transaction(async (tx) => {
       let linkedStudent: unknown = null;
+      let loginInfo: { username: string; password: string } | null = null;
       let studentId = existing.studentId;
 
       if (input.status === 'accepted') {
@@ -371,47 +421,101 @@ export async function changeAdmissionStatus(
         for (let attempt = 0; attempt < 5; attempt++) {
           const admissionNo = input.admissionNo ?? (await nextStudentAdmissionNo(tx, tenant.id, year, attempt));
           try {
-            const [stu] = await tx
-              .insert(students)
-              .values({
-                tenantId: tenant.id,
-                admissionId: existing.id,
-                admissionNo,
-                firstName: existing.firstName,
-                lastName: existing.lastName,
-                fullName: joinName(existing.firstName, existing.lastName),
-                dob: existing.dob,
-                gender: existing.gender,
-                bloodGroup: existing.bloodGroup,
-                religionId: existing.religionId,
-                socialCategory: existing.socialCategory,
-                fatherName: existing.fatherName,
-                fatherPhone: existing.fatherPhone,
-                fatherEmail: existing.fatherEmail,
-                fatherOccupation: existing.fatherOccupation,
-                motherName: existing.motherName,
-                motherPhone: existing.motherPhone,
-                motherEmail: existing.motherEmail,
-                motherOccupation: existing.motherOccupation,
-                primaryGuardianId: guardian.id,
-                addressLine1: existing.addressLine1,
-                addressLine2: existing.addressLine2,
-                cityId: existing.cityId,
-                postalCode: existing.postalCode,
-                studentHouseId: input.studentHouseId ?? null,
-                status: 'active',
-                admittedOn,
-              })
-              .returning();
-            createdStudent = stu;
+            // Savepoint per attempt: a unique violation must not abort the whole transaction.
+            createdStudent = await tx.transaction(async (sp) => {
+              const [stu] = await sp
+                .insert(students)
+                .values({
+                  tenantId: tenant.id,
+                  admissionId: existing.id,
+                  admissionNo,
+                  firstName: existing.firstName,
+                  lastName: existing.lastName,
+                  fullName: joinName(existing.firstName, existing.lastName),
+                  dob: existing.dob,
+                  gender: existing.gender,
+                  bloodGroup: existing.bloodGroup,
+                  religionId: existing.religionId,
+                  socialCategory: existing.socialCategory,
+                  fatherName: existing.fatherName,
+                  fatherPhone: existing.fatherPhone,
+                  fatherEmail: existing.fatherEmail,
+                  fatherOccupation: existing.fatherOccupation,
+                  motherName: existing.motherName,
+                  motherPhone: existing.motherPhone,
+                  motherEmail: existing.motherEmail,
+                  motherOccupation: existing.motherOccupation,
+                  primaryGuardianId: guardian.id,
+                  addressLine1: existing.addressLine1,
+                  addressLine2: existing.addressLine2,
+                  cityId: existing.cityId,
+                  postalCode: existing.postalCode,
+                  studentHouseId: input.studentHouseId ?? null,
+                  status: 'active',
+                  admittedOn,
+                })
+                .returning();
+              return stu;
+            });
             break;
           } catch (e) {
             if (!isUniqueViolation(e) || input.admissionNo) throw e;
+            console.error('accept: student unique violation, constraint =', constraintOf(e), ', admissionNo =', admissionNo);
           }
         }
         if (!createdStudent) {
           throw new HttpError(409, 'Could not generate a student admission number, please try again');
         }
+
+        // ---- student login: username = phone (or admission no), password = DOB ----
+        const [studentRole] = await tx
+          .select({ id: roles.id })
+          .from(roles)
+          .where(and(eq(roles.tenantId, tenant.id), eq(roles.code, 'student')))
+          .limit(1);
+        if (!studentRole) throw new HttpError(400, 'The "student" role is missing in this school');
+
+        const loginUsername = await pickUsername(tx, existing.phone, createdStudent.admissionNo);
+        const loginPassword = dobPassword(existing.dob);
+
+        // Store phone/email on the login only when no other user already has them
+        // (otherwise the insert would fail on a unique rule).
+        const wantedPhone = existing.phone?.trim() || null;
+        const wantedEmail = existing.email?.trim() || null;
+        const [phoneTaken] = wantedPhone
+          ? await tx.select({ id: users.id }).from(users).where(eq(users.phone, wantedPhone)).limit(1)
+          : [];
+        const [emailTaken] = wantedEmail
+          ? await tx.select({ id: users.id }).from(users).where(eq(users.email, wantedEmail)).limit(1)
+          : [];
+
+        const [studentUser] = await tx
+          .insert(users)
+          .values({
+            username: loginUsername,
+            phone: phoneTaken ? null : wantedPhone,
+            email: emailTaken ? null : wantedEmail,
+            fullName: joinName(existing.firstName, existing.lastName),
+            passwordHash: await argon2.hash(loginPassword),
+            userType: 'student',
+            mustChangePassword: true,
+          })
+          .returning({ id: users.id });
+
+        const [studentMembership] = await tx
+          .insert(memberships)
+          .values({ tenantId: tenant.id, userId: studentUser.id })
+          .returning({ id: memberships.id });
+
+        await tx.insert(membershipRoles).values({
+          membershipId: studentMembership.id,
+          roleId: studentRole.id,
+          tenantId: tenant.id,
+        });
+
+        await tx.update(students).set({ userId: studentUser.id }).where(eq(students.id, createdStudent.id));
+        createdStudent = { ...createdStudent, userId: studentUser.id };
+        loginInfo = { username: loginUsername, password: 'Date of birth (DD-MM-YYYY)' };
 
         await tx.insert(studentGuardians).values({
           studentId: createdStudent.id,
@@ -464,12 +568,19 @@ export async function changeAdmissionStatus(
       return {
         ...toAdmission(updated),
         ...(linkedStudent ? { student: linkedStudent } : {}),
+        ...(loginInfo ? { login: loginInfo } : {}),
         history,
       };
     });
   } catch (e) {
-    if (isUniqueViolation(e)) throw new HttpError(409, 'Admission number or student link already exists');
-    if (isForeignKeyViolation(e)) throw new HttpError(400, 'Invalid reference ID provided');
+    if (isUniqueViolation(e)) {
+      console.error('changeAdmissionStatus: unique violation, constraint =', constraintOf(e));
+      throw new HttpError(409, conflictMessage(e));
+    }
+    if (isForeignKeyViolation(e)) {
+      console.error('changeAdmissionStatus: foreign key violation, constraint =', constraintOf(e));
+      throw new HttpError(400, 'Invalid reference ID provided');
+    }
     throw e;
   }
 }

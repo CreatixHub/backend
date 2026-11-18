@@ -7,6 +7,7 @@ import { listMyOrganizations } from '../../lib/tenant';
 import { currentUser } from '../../middleware/authenticate';
 import { loginSchema, mobileRefreshSchema, signupSchema, switchOrganizationSchema } from './auth.schemas';
 import * as auth from './auth.service';
+import { changePassword, changePasswordSchema } from './changePassword';
 import { clearRefreshCookie, isMobileClient, sendSession, toFrontendUser } from './session';
 import type { ClientMeta } from './session';
 
@@ -84,4 +85,11 @@ privateAuthRouter.post('/switch-organization', async (req, res) => {
     ? (typeof req.body?.refreshToken === 'string' ? req.body.refreshToken : undefined)
     : req.cookies?.rt;
   sendSession(res, 200, await auth.switchOrganization(currentUser(req).id, organization, refreshToken, clientMeta(req)), mobile);
+});
+
+// Change the signed-in user's own password (also used for the first-login forced change).
+privateAuthRouter.post('/change-password', authLimiter, async (req, res) => {
+  const input = changePasswordSchema.parse(req.body);
+  await changePassword(currentUser(req), input, req.cookies?.rt);
+  noContent(res);
 });
