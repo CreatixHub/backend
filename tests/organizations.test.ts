@@ -34,7 +34,7 @@ describe("organizations & tenant permissions", () => {
 
     const switched = await switchOrganization(slug);
     expect(switched.status).toBe(200);
-    expect(switched.body.data.organization.slug).toBe(slug);
+    expect(switched.body.data.user.organization.slug).toBe(slug);
 
     const current = await agent.get("/api/organizations/current");
     expect(current.status).toBe(200);

@@ -120,6 +120,9 @@ async function assertHouse(tenantId: bigint, houseId: bigint) {
 async function nextApplicationNo(tx: Tx, tenantId: bigint, year: string, offset: number): Promise<string> {
   const prefix = `APP-${year}-`;
   const [r] = await tx
+    // ::int on the "from" offset is required: an untyped parameter here makes Postgres resolve the AMBIGUOUS
+    // substring(text, text) pattern-matching overload instead of substring(text, int) positional one, which
+    // silently returns NULL for every row (so this always looked like "no admissions yet" and proposed 0001).
     .select({ max: sql<number | null>`max(substring(${admissions.applicationNo} from ${prefix.length + 1}::int)::int)` })
     .from(admissions)
     .where(and(eq(admissions.tenantId, tenantId), sql`${admissions.applicationNo} ~ ${'^APP-' + year + '-[0-9]+$'}`));
@@ -268,10 +271,12 @@ export async function createAdmission(tenant: TenantContext, actor: AuthUser, in
       for (let attempt = 0; attempt < 5; attempt++) {
         const applicationNo = input.applicationNo ?? (await nextApplicationNo(tx, tenant.id, year, attempt));
         try {
-          // Each attempt runs in its own savepoint, so a unique violation only
-          // rolls back this attempt and the next retry can still run.
-          return await tx.transaction(async (sp) => {
-            const [createdRow] = await sp
+          // A nested transaction = a SAVEPOINT: if this attempt's insert collides on applicationNo, only
+          // THIS attempt rolls back. Without it, Postgres marks the whole outer transaction aborted on the
+          // unique-violation, and the next attempt's nextApplicationNo() SELECT fails with "current
+          // transaction is aborted" instead of retrying cleanly.
+          return await tx.transaction(async (tx2) => {
+            const [createdRow] = await tx2
               .insert(admissions)
               .values({
                 ...columns,
@@ -293,7 +298,7 @@ export async function createAdmission(tenant: TenantContext, actor: AuthUser, in
               })
               .returning();
 
-            await sp.insert(admissionStatusHistory).values({
+            await tx2.insert(admissionStatusHistory).values({
               tenantId: tenant.id,
               admissionId: createdRow.id,
               fromStatus: null,
@@ -302,7 +307,7 @@ export async function createAdmission(tenant: TenantContext, actor: AuthUser, in
               changedBy: actor.id,
             });
 
-            const history = await loadHistory(tenant.id, createdRow.id, sp);
+            const history = await loadHistory(tenant.id, createdRow.id, tx2);
             return { ...toAdmission(createdRow), history };
           });
         } catch (e) {

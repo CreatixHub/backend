@@ -1,4 +1,4 @@
-import type { Response } from "express";
+import type { Request, Response } from "express";
 import jwt from "jsonwebtoken";
 import { randomBytes, randomUUID } from "node:crypto";
 import { config } from "../../config";
@@ -11,6 +11,13 @@ import type { TenantContext } from "../../lib/tenant";
 export interface ClientMeta {
   ip?: string;
   userAgent?: string;
+}
+
+// ---- B1: Mobile Client Detection ----
+// A mobile client identifies itself with the `X-Client: mobile` header.
+// This is NOT an authentication mechanism; it only controls the token delivery strategy.
+export function isMobileClient(req: Request): boolean {
+  return req.get("x-client")?.toLowerCase() === "mobile";
 }
 
 // The access token says WHO the person is and which school they are acting in (tid). Absent tid = no school yet.
@@ -111,7 +118,7 @@ export function toFrontendUser(
   };
 }
 
-// Sets the refresh cookie, then sends { accessToken, expiresIn, user, organizations } in the usual envelope.
+// Sets the refresh cookie (web) or includes the refresh token in JSON (mobile), then sends the session payload.
 export function sendSession(
   res: Response,
   status: 200 | 201,
@@ -121,15 +128,23 @@ export function sendSession(
     tenant: TenantContext | null;
     organizations: unknown[];
   },
+  mobile = false,
 ) {
-  setRefreshCookie(res, p.session.refreshToken);
-  const data = {
+  const data: Record<string, unknown> = {
     accessToken: p.session.accessToken,
     expiresIn: config.JWT_ACCESS_TTL,
     user: toFrontendUser(p.user, p.tenant),
     organizations: p.organizations,
   };
-  // The refresh token goes ONLY in the cookie, never in this JSON.
+
+  if (mobile) {
+    // B2: Mobile clients cannot use httpOnly cookies; return the refresh token in the JSON body.
+    data.refreshToken = p.session.refreshToken;
+  } else {
+    // Web: the refresh token goes ONLY in the httpOnly cookie, never in the JSON body.
+    setRefreshCookie(res, p.session.refreshToken);
+  }
+
   if (status === 201) created(res, data);
   else ok(res, data);
 }
