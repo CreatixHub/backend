@@ -36,6 +36,11 @@ studentsRouter.get('/me', async (req, res) => {
   ok(res, await svc.getMyStudent(currentTenant(req), currentUser(req)));
 });
 
+// The signed-in student's own class, section and weekly timetable (same rule: no permission, own login only).
+studentsRouter.get('/me/timetable', async (req, res) => {
+  ok(res, await svc.getMyTimetable(currentTenant(req), currentUser(req)));
+});
+
 studentsRouter.get('/:id', requirePermission('students.view'), async (req, res) => {
   ok(res, await svc.getStudent(currentTenant(req), currentUser(req), parseId(req.params.id)));
 });
