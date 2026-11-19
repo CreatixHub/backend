@@ -81,6 +81,27 @@ git push
   `admissions.service.ts` or `staff.service.ts`, say so in standup/Slack before you start editing
   it too - cheaper than resolving it after the fact.
 
+## If your PR changes the database schema
+
+Everyone - CI, every developer's local backend, and production - points at the **same shared
+Supabase database**. CI does **not** auto-apply migrations (on purpose: that would let any pushed
+branch alter the live schema before anyone's reviewed it). This means:
+
+- `npm run db:generate` (drizzle-kit) creates a migration file, but it does nothing by itself -
+  your CI run, and everyone else's `npm run dev`, still see the OLD schema until someone actually
+  applies it.
+- **If you don't apply your own migration, CI will fail in a confusing way**: not on the column
+  you added, but on *unrelated* existing tests, because Drizzle's generated SQL always references
+  every column in the TypeScript schema - a missing column breaks every query that touches that
+  table, not just the new one. (This happened with PR #49's photo-upload column.)
+- So: once you're confident in your migration (and ideally once the PR has at least a first look),
+  run it yourself against the shared DB:
+  ```bash
+  npm run db:migrate
+  ```
+  Migrations are additive-only and safe to run more than once. Do this *before* pushing / re-running
+  CI, not after - otherwise CI will fail for everyone until you do.
+
 ## Local checks before you push
 
 ```bash
