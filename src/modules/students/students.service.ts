@@ -1,14 +1,20 @@
-import { and, asc, count, desc, eq, getTableColumns, ilike, inArray, isNull, ne, or, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, getTableColumns, gte, ilike, inArray, isNull, lte, ne, or, sql } from 'drizzle-orm';
 import { db } from '../../db';
 import {
   admissions,
+  classes,
+  classrooms,
   guardians,
   memberships,
+  sections,
   staff,
   studentDocuments,
   studentGuardians,
   studentHouses,
   students,
+  subjects,
+  timeSlots,
+  timetableEntries,
   users,
 } from '../../db/schema';
 import { HttpError } from '../../lib/errors';
@@ -456,10 +462,14 @@ export async function listStudents(tenant: TenantContext, actor: AuthUser, q: Li
         houseName: studentHouses.name,
         primaryGuardianName: guardians.fullName,
         primaryGuardianPhone: guardians.phone,
+        className: classes.name,
+        gradeLevel: classes.gradeLevel,
       })
       .from(students)
       .leftJoin(studentHouses, eq(students.studentHouseId, studentHouses.id))
       .leftJoin(guardians, eq(students.primaryGuardianId, guardians.id))
+      .leftJoin(admissions, and(eq(admissions.studentId, students.id), isNull(admissions.deletedAt)))
+      .leftJoin(classes, eq(classes.id, admissions.classId))
       .where(where)
       .orderBy(asc(students.admissionNo), asc(students.id))
       .offset((q.page - 1) * q.limit)
@@ -540,6 +550,106 @@ export async function getMyStudent(tenant: TenantContext, actor: AuthUser) {
     .orderBy(desc(studentGuardians.isPrimary), asc(guardians.fullName));
 
   return { ...toRow(row), guardians: guardianRows };
+}
+
+// ================================================================ MY CLASS & TIMETABLE (signed-in student)
+// The caller's own class, section and weekly timetable. Tied to their login (students.userId), no staff permission.
+// Section: while a class has exactly one active section the student is in it; with several, a section must be assigned first.
+export async function getMyTimetable(tenant: TenantContext, actor: AuthUser) {
+  const [me] = await db
+    .select({ id: students.id, classId: admissions.classId, className: classes.name })
+    .from(students)
+    .leftJoin(admissions, and(eq(admissions.studentId, students.id), isNull(admissions.deletedAt)))
+    .leftJoin(classes, eq(classes.id, admissions.classId))
+    .where(and(eq(students.tenantId, tenant.id), eq(students.userId, actor.id), isNull(students.deletedAt)))
+    .limit(1);
+  if (!me) throw new HttpError(404, 'No student record is linked to this login');
+
+  const empty = (message: string, sectionId: bigint | null = null, sectionName: string | null = null) => ({
+    classId: me.classId ?? null,
+    className: me.className ?? null,
+    sectionId,
+    sectionName,
+    message,
+    slots: [] as unknown[],
+    entries: [] as unknown[],
+  });
+
+  if (me.classId === null || me.classId === undefined) return empty('No class is assigned to you yet.');
+
+  const classSections = await db
+    .select({ id: sections.id, name: sections.name })
+    .from(sections)
+    .where(
+      and(
+        eq(sections.tenantId, tenant.id),
+        eq(sections.classId, me.classId),
+        isNull(sections.deletedAt),
+        eq(sections.status, 'active'),
+      ),
+    )
+    .orderBy(asc(sections.name));
+
+  if (classSections.length === 0) return empty('Your class has no section yet.');
+  if (classSections.length > 1) return empty('Your section has not been assigned yet. Please contact the school office.');
+
+  const section = classSections[0];
+  const today = todayStr();
+
+  const [slots, entries] = await Promise.all([
+    db
+      .select({
+        id: timeSlots.id,
+        name: timeSlots.name,
+        sequence: timeSlots.sequence,
+        startsAt: timeSlots.startsAt,
+        endsAt: timeSlots.endsAt,
+        isBreak: timeSlots.isBreak,
+      })
+      .from(timeSlots)
+      .where(and(eq(timeSlots.tenantId, tenant.id), eq(timeSlots.isActive, true)))
+      .orderBy(asc(timeSlots.sequence)),
+    db
+      .select({
+        id: timetableEntries.id,
+        dayOfWeek: timetableEntries.dayOfWeek,
+        timeSlotId: timetableEntries.timeSlotId,
+        slotName: timeSlots.name,
+        slotSequence: timeSlots.sequence,
+        startsAt: timeSlots.startsAt,
+        endsAt: timeSlots.endsAt,
+        subjectName: subjects.name,
+        subjectCode: subjects.code,
+        subjectColor: subjects.color,
+        teacherName: staff.fullName,
+        classroomCode: classrooms.code,
+      })
+      .from(timetableEntries)
+      .innerJoin(subjects, eq(timetableEntries.subjectId, subjects.id))
+      .innerJoin(staff, eq(timetableEntries.teacherId, staff.id))
+      .innerJoin(timeSlots, eq(timetableEntries.timeSlotId, timeSlots.id))
+      .leftJoin(classrooms, eq(timetableEntries.classroomId, classrooms.id))
+      .where(
+        and(
+          eq(timetableEntries.tenantId, tenant.id),
+          eq(timetableEntries.sectionId, section.id),
+          eq(timetableEntries.status, 'active'),
+          lte(timetableEntries.effectiveFrom, today),
+          or(isNull(timetableEntries.effectiveTo), gte(timetableEntries.effectiveTo, today)),
+        ),
+      )
+      .orderBy(asc(timetableEntries.dayOfWeek), asc(timeSlots.sequence)),
+  ]);
+
+  return {
+    classId: me.classId,
+    className: me.className ?? null,
+    sectionId: section.id,
+    sectionName: section.name,
+    message: '',
+    slots,
+    entries,
+  };
 }
 
 export async function createStudent(tenant: TenantContext, _actor: AuthUser, input: CreateStudentInput) {

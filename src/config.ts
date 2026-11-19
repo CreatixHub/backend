@@ -17,6 +17,7 @@ const schema = z.object({
   COOKIE_SECURE: z.enum(["true", "false"]).default("false").transform((v) => v === "true"),
   NODE_ENV: z.string().optional(), // "production" on the server
   DOCS_ENABLED: z.enum(["true", "false"]).optional(), // API docs at /api/docs; default: on, except when NODE_ENV=production
+  UPLOAD_DIR: z.string().min(1).default("uploads"), // where uploaded files (photos...) are stored on disk
 });
 
 // Fail fast with a readable message instead of crashing later with "undefined".
