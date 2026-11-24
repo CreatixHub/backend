@@ -27,3 +27,13 @@ export const notificationIdSchema = z.object({ id }).strict();
 
 export type ListNotificationsInput = z.infer<typeof listNotificationsSchema>;
 export type RegisterTokenInput = z.infer<typeof registerTokenSchema>;
+export const broadcastNotificationSchema = z
+  .object({
+    title: z.string().trim().min(1).max(150),
+    body: z.string().trim().min(1).max(2000),
+  })
+  .strict();
+
+export type BroadcastNotificationInput =
+  z.infer<typeof broadcastNotificationSchema>;
+

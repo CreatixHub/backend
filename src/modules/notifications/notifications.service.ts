@@ -169,3 +169,106 @@ export async function removeToken(actor: AuthUser, token: string) {
   await db.delete(devicePushTokens).where(and(eq(devicePushTokens.token, token), eq(devicePushTokens.userId, actor.id)));
   return { removed: true };
 }
+export async function broadcastNotification(
+  tenant: TenantContext,
+  actor: AuthUser,
+  input: import('./notifications.schemas').BroadcastNotificationInput,
+) {
+  const { memberships, users } = await import('../../db/schema');
+  const { HttpError } = await import('../../lib/errors');
+
+  if (
+    !tenant.roles.includes('admin') &&
+    !tenant.roles.includes('owner')
+  ) {
+    throw new HttpError(
+      403,
+      'Only administrators can publish notifications',
+    );
+  }
+
+  const recipients = await db
+    .select({ userId: users.id })
+    .from(memberships)
+    .innerJoin(users, eq(memberships.userId, users.id))
+    .where(
+      and(
+        eq(memberships.tenantId, tenant.id),
+        eq(memberships.status, 'active'),
+        eq(users.status, 'active'),
+        isNull(users.deletedAt),
+      ),
+    );
+
+  const userIds = [
+    ...new Set(recipients.map((r) => r.userId)),
+  ];
+
+  if (userIds.length === 0) {
+    throw new HttpError(400, 'No active recipients found');
+  }
+
+  const items: NewNotification[] = userIds.map((userId) => ({
+    userId,
+    type: 'announcement',
+    title: input.title,
+    body: input.body,
+    data: {
+      publishedBy: actor.id.toString(),
+      category: 'announcement',
+    },
+  }));
+
+  const rows = await db.transaction(async (tx) => {
+    const saved: { id: bigint; userId: bigint }[] = [];
+
+    for (let i = 0; i < items.length; i += 500) {
+      const chunk = items.slice(i, i + 500);
+
+      const inserted = await tx
+        .insert(notifications)
+        .values(
+          chunk.map((n) => ({
+            tenantId: tenant.id,
+            userId: n.userId,
+            type: n.type,
+            title: n.title,
+            body: n.body,
+            data: n.data ?? {},
+          })),
+        )
+        .returning({
+          id: notifications.id,
+          userId: notifications.userId,
+        });
+
+      saved.push(...inserted);
+    }
+
+    return saved;
+  });
+
+  const notificationIds = new Map(
+    rows.map((r) => [r.userId, r.id]),
+  );
+
+  void sendPush(
+    tenant.id,
+    items.map((n) => ({
+      ...n,
+      notificationId: notificationIds.get(n.userId),
+    })),
+  ).catch((error) => {
+    logger.warn(
+      { err: error },
+      'Announcement push notification failed',
+    );
+  });
+
+  return {
+    published: true,
+    recipientCount: rows.length,
+    message: 'Notification published successfully',
+  };
+}
+

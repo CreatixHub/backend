@@ -33,3 +33,18 @@ notificationsRouter.post('/push-token/remove', async (req, res) => {
 notificationsRouter.post('/:id/read', async (req, res) => {
   ok(res, await svc.markRead(currentTenant(req), currentUser(req), parseId(req.params.id)));
 });
+notificationsRouter.post('/broadcast', async (req, res) => {
+  const { broadcastNotificationSchema } =
+    await import('./notifications.schemas');
+
+  const input = broadcastNotificationSchema.parse(req.body);
+
+  const result = await svc.broadcastNotification(
+    currentTenant(req),
+    currentUser(req),
+    input,
+  );
+
+  ok(res, result);
+});
+
