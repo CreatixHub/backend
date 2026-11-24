@@ -518,6 +518,30 @@ export const sectionTeachers = pgTable(
   ],
 );
 
+// Which teacher is in charge of a class (its class teacher). One per class.
+// Different from section_teachers, which is who teaches each subject.
+export const classTeachers = pgTable(
+  "class_teachers",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    classId: plainBigint("class_id")
+      .notNull()
+      .references(() => classes.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    teacherId: plainBigint("teacher_id")
+      .notNull()
+      .references(() => staff.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("class_teachers_tenant_id_class_id_key").on(t.tenantId, t.classId),
+    index("class_teachers_tenant_id_teacher_id_idx").on(t.tenantId, t.teacherId),
+  ],
+);
+
 // The actual weekly grid: on this day, in this time slot, this section has this subject with this teacher, in this room.
 export const timetableEntries = pgTable(
   "timetable_entries",
@@ -1038,6 +1062,7 @@ export const students = pgTable(
       onUpdate: "cascade",
     }),
     admissionNo: text("admission_no").notNull(),
+    rollNo: text("roll_no"), // class roll number, generated A-Z by name
     firstName: text("first_name").notNull(),
     lastName: text("last_name").notNull(),
     fullName: text("full_name"),
@@ -1403,6 +1428,93 @@ export const studentAttendance = pgTable(
   ],
 );
 
+// Attendance taken every period (hour). One row = one student, in one timetable period, on one date.
+// class/slot/subject/teacher are copied from the period when it is marked, so later timetable changes do not rewrite history.
+export const periodAttendance = pgTable(
+  "period_attendance",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    attendanceDate: date("attendance_date").notNull(),
+    timetableEntryId: plainBigint("timetable_entry_id")
+      .notNull()
+      .references(() => timetableEntries.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    classId: plainBigint("class_id")
+      .notNull()
+      .references(() => classes.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    timeSlotId: plainBigint("time_slot_id")
+      .notNull()
+      .references(() => timeSlots.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    subjectId: plainBigint("subject_id")
+      .notNull()
+      .references(() => subjects.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    teacherId: plainBigint("teacher_id")
+      .notNull()
+      .references(() => staff.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    studentId: plainBigint("student_id")
+      .notNull()
+      .references(() => students.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    status: text("status").notNull(), // present | absent | late | excused
+    remarks: text("remarks"),
+    markedBy: plainBigint("marked_by").references(() => users.id, { onDelete: "set null", onUpdate: "cascade" }),
+    markedAt: ts("marked_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("period_attendance_period_student_key").on(t.tenantId, t.attendanceDate, t.timetableEntryId, t.studentId),
+    index("period_attendance_tenant_id_date_idx").on(t.tenantId, t.attendanceDate),
+    index("period_attendance_tenant_id_student_id_date_idx").on(t.tenantId, t.studentId, t.attendanceDate),
+    index("period_attendance_tenant_id_class_id_date_idx").on(t.tenantId, t.classId, t.attendanceDate),
+  ],
+);
+
+// In-app notifications (e.g. "marked absent in Period 3"). One row per recipient user.
+export const notifications = pgTable(
+  "notifications",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    userId: plainBigint("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    type: text("type").notNull(), // attendance_absent | ...
+    title: text("title").notNull(),
+    body: text("body").notNull(),
+    data: jsonb("data").$type<Record<string, unknown>>().notNull().default({}),
+    readAt: ts("read_at"),
+    pushSentAt: ts("push_sent_at"),
+    createdAt: createdAt(),
+  },
+  (t) => [index("notifications_user_created_idx").on(t.tenantId, t.userId, t.createdAt)],
+);
+
+// Expo push tokens, one row per phone (a user can have several phones).
+export const devicePushTokens = pgTable(
+  "device_push_tokens",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    userId: plainBigint("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    token: text("token").notNull(),
+    platform: text("platform"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("device_push_tokens_token_key").on(t.token),
+    index("device_push_tokens_user_idx").on(t.tenantId, t.userId),
+  ],
+);
+
 export const staffAttendance = pgTable(
   "staff_attendance",
   {
@@ -1644,6 +1756,7 @@ export const payments = pgTable(
     receivedBy: plainBigint("received_by").references(() => users.id, { onDelete: "set null", onUpdate: "cascade" }),
     status: text("status").notNull().default("cleared"), // cleared | pending | bounced | reversed
     idempotencyKey: text("idempotency_key"),
+    referenceNo: text("reference_no"), // UPI reference number (UTR) entered by the student
     chequeNo: text("cheque_no"),
     chequeDate: date("cheque_date"),
     chequeStatus: text("cheque_status"),
@@ -1653,6 +1766,7 @@ export const payments = pgTable(
   (t) => [
     uniqueIndex("payments_tenant_id_receipt_no_key").on(t.tenantId, t.receiptNo),
     uniqueIndex("payments_tenant_id_idempotency_key_key").on(t.tenantId, t.idempotencyKey),
+    uniqueIndex("payments_tenant_id_reference_no_key").on(t.tenantId, t.referenceNo),
     index("payments_tenant_id_student_id_idx").on(t.tenantId, t.studentId),
   ],
 );
@@ -2107,3 +2221,36 @@ export const exitPassesRelations = relations(exitPasses, ({ one }) => ({
   requestedByStaff: one(staff, { fields: [exitPasses.requestedByStaffId], references: [staff.id] }),
   approvedByUser: one(users, { fields: [exitPasses.approvedBy], references: [users.id] }),
 }));
+
+export const classTeachersRelations = relations(classTeachers, ({ one }) => ({
+  class: one(classes, { fields: [classTeachers.classId], references: [classes.id] }),
+  teacher: one(staff, { fields: [classTeachers.teacherId], references: [staff.id] }),
+}));
+// ================================================================ CLASS NOTES
+// A teacher uploads a note (a file) for a class; every student of that class can open it.
+export const classNotes = pgTable(
+  "class_notes",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    classId: plainBigint("class_id")
+      .notNull()
+      .references(() => classes.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    subjectId: plainBigint("subject_id").references(() => subjects.id, { onDelete: "set null", onUpdate: "cascade" }),
+    title: text("title").notNull(),
+    description: text("description"),
+    fileId: plainBigint("file_id")
+      .notNull()
+      .references((): AnyPgColumn => files.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    uploadedBy: plainBigint("uploaded_by").references((): AnyPgColumn => users.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    deletedAt: ts("deleted_at"),
+  },
+  (t) => [index("class_notes_tenant_id_class_id_idx").on(t.tenantId, t.classId)],
+);

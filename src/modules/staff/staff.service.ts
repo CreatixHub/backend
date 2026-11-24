@@ -213,7 +213,7 @@ export async function getMyStaff(tenant: TenantContext, actor: AuthUser): Promis
 
 export async function createStaff(tenant: TenantContext, _actor: AuthUser, input: CreateStaffInput): Promise<unknown> {
   // assignments + academicYearId are saved to section_teachers, not to the staff table
-  const { createLogin, assignments, academicYearId, ...staffInput } = input;
+  const { createLogin, roleCode: chosenRole, assignments, academicYearId, ...staffInput } = input;
   if (assignments && assignments.length > 0 && !academicYearId) {
     throw new HttpError(400, 'academicYearId is required when assigning classes and subjects');
   }
@@ -236,13 +236,23 @@ export async function createStaff(tenant: TenantContext, _actor: AuthUser, input
         let login: { username: string; password: string } | null = null;
 
         if (wantsLogin) {
-          const roleCode = staffInput.staffType === 'teaching' ? 'teacher' : 'staff';
+          const NON_TEACHING_ROLES = ['staff', 'accountant', 'librarian', 'receptionist', 'warden', 'transport_manager', 'nurse', 'security'];
+          if (chosenRole && !NON_TEACHING_ROLES.includes(chosenRole)) throw new HttpError(400, 'That login role is not allowed for staff');
+          const roleCode = staffInput.staffType === 'teaching' ? 'teacher' : (chosenRole ?? 'staff');
           const [role] = await tx
             .select({ id: roles.id })
             .from(roles)
             .where(and(eq(roles.tenantId, tenant.id), eq(roles.code, roleCode)))
             .limit(1);
-          if (!role) throw new HttpError(400, `The "${roleCode}" role is missing in this school`);
+          let roleId: bigint;
+          if (role) roleId = role.id;
+          else if (roleCode === 'staff') {
+            const [made] = await tx
+              .insert(roles)
+              .values({ tenantId: tenant.id, code: 'staff', name: 'Staff', description: 'Non-teaching staff', isSystem: false })
+              .returning({ id: roles.id });
+            roleId = made.id;
+          } else throw new HttpError(400, `The "${roleCode}" role is missing in this school`);
 
           // username = phone; falls back to the employee number if empty or already taken
           const wantedPhone = staffInput.phone?.trim() || null;
@@ -280,7 +290,7 @@ export async function createStaff(tenant: TenantContext, _actor: AuthUser, input
 
           await tx.insert(membershipRoles).values({
             membershipId: membership.id,
-            roleId: role.id,
+            roleId,
             tenantId: tenant.id,
           });
 

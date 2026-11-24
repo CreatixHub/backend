@@ -96,6 +96,7 @@ export const createStaffSchema = z
   .object({
     ...staffFields,
     createLogin: z.boolean().optional(),
+    roleCode: z.string().trim().min(1).max(40).optional(), // login role for non-teaching staff
     academicYearId: id.optional(),
     assignments: z.array(z.object({ classId: id, subjectId: id }).strict()).max(40).optional(),
   })

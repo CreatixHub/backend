@@ -1,0 +1,437 @@
+import express, { Router } from 'express';
+import type { NextFunction, Request, Response } from 'express';
+import { randomUUID } from 'node:crypto';
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { and, asc, desc, eq, inArray, isNull } from 'drizzle-orm';
+import { z } from 'zod';
+import { config } from '../../config';
+import { db } from '../../db';
+import {
+  admissions,
+  classes,
+  classNotes,
+  classSubjects,
+  classTeachers,
+  files,
+  sections,
+  sectionTeachers,
+  staff,
+  subjects,
+  users,
+} from '../../db/schema';
+import { parseId } from '../../lib/bigint';
+import { HttpError } from '../../lib/errors';
+import { isRowScopedFor, resolveStudentScope } from '../../lib/ownership';
+import { created, noContent, ok } from '../../lib/respond';
+import { hasPermission } from '../../lib/tenant';
+import type { TenantContext } from '../../lib/tenant';
+import { currentTenant, currentUser } from '../../middleware/authenticate';
+import type { AuthUser } from '../../middleware/authenticate';
+import { requirePermission } from '../../middleware/requirePermission';
+import { locateFile } from '../files/files.service';
+
+// CLASS NOTES.
+// A teacher uploads a file (PDF, Word, PowerPoint, Excel or an image) to a class. Every student of that
+// class can open and download it. Permissions are the Homework ones: homework.view to read, homework.create
+// to add. A teacher can only add to the classes they teach; a student only sees their own class.
+
+const NOTE_PURPOSE = 'class_note';
+const MAX_NOTE_BYTES = 10 * 1024 * 1024; // 10 MB
+const UPLOAD_ROOT = path.resolve(config.UPLOAD_DIR);
+
+const EXT_MIME: Record<string, string> = {
+  pdf: 'application/pdf',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  ppt: 'application/vnd.ms-powerpoint',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  webp: 'image/webp',
+};
+
+/** The real type is decided from the first bytes, so a renamed file cannot pass as a document. */
+function sniffDocument(buf: Buffer, ext: string): string | null {
+  const mime = EXT_MIME[ext];
+  if (!mime) return null;
+  const starts = (...bytes: number[]) => bytes.every((b, i) => buf[i] === b);
+  switch (ext) {
+    case 'pdf':
+      return buf.subarray(0, 5).toString('latin1') === '%PDF-' ? mime : null;
+    case 'doc':
+    case 'ppt':
+    case 'xls':
+      return starts(0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1) ? mime : null;
+    case 'docx':
+    case 'pptx':
+    case 'xlsx':
+      return starts(0x50, 0x4b, 0x03, 0x04) ? mime : null;
+    case 'jpg':
+    case 'jpeg':
+      return starts(0xff, 0xd8, 0xff) ? mime : null;
+    case 'png':
+      return starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a) ? mime : null;
+    case 'webp':
+      return buf.length >= 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP'
+        ? mime
+        : null;
+    default:
+      return null;
+  }
+}
+
+const safeName = (name: string) => path.basename(name).replace(/[^\w.\- ]+/g, '_').slice(0, 200) || 'note';
+
+// ---------------------------------------------------------------- who can see which class
+type Access = { all: true } | { all: false; classIds: bigint[] };
+
+async function teacherClassIds(tenantId: bigint, userId: bigint): Promise<bigint[]> {
+  const [me] = await db
+    .select({ id: staff.id })
+    .from(staff)
+    .where(and(eq(staff.tenantId, tenantId), eq(staff.userId, userId), isNull(staff.deletedAt)))
+    .limit(1);
+  if (!me) return [];
+
+  const asClassTeacher = await db
+    .select({ classId: classTeachers.classId })
+    .from(classTeachers)
+    .where(and(eq(classTeachers.tenantId, tenantId), eq(classTeachers.teacherId, me.id)));
+  const asSectionTeacher = await db
+    .selectDistinct({ classId: sections.classId })
+    .from(sectionTeachers)
+    .innerJoin(sections, eq(sectionTeachers.sectionId, sections.id))
+    .where(
+      and(eq(sectionTeachers.tenantId, tenantId), eq(sectionTeachers.teacherId, me.id), isNull(sections.deletedAt)),
+    );
+
+  const seen = new Map<string, bigint>();
+  for (const r of [...asClassTeacher, ...asSectionTeacher]) seen.set(String(r.classId), r.classId);
+  return [...seen.values()];
+}
+
+async function studentClassIds(tenant: TenantContext, user: AuthUser): Promise<bigint[]> {
+  const scope = await resolveStudentScope(tenant, user.id, 'homework.view');
+  if (!scope.scoped || scope.studentIds.length === 0) return [];
+  const rows = await db
+    .selectDistinct({ classId: admissions.classId })
+    .from(admissions)
+    .where(
+      and(
+        eq(admissions.tenantId, tenant.id),
+        inArray(admissions.studentId, scope.studentIds),
+        isNull(admissions.deletedAt),
+      ),
+    );
+  return rows.map((r) => r.classId).filter((c): c is bigint => c !== null && c !== undefined);
+}
+
+async function accessFor(tenant: TenantContext, user: AuthUser): Promise<Access> {
+  // students (and their parents): only the class of their linked student
+  if (isRowScopedFor(tenant, 'homework.view')) return { all: false, classIds: await studentClassIds(tenant, user) };
+  // a teacher (not an admin): only the classes they teach
+  const teacherOnly =
+    tenant.roles.includes('teacher') && !tenant.roles.includes('admin') && !tenant.permissions.has('*');
+  if (teacherOnly) return { all: false, classIds: await teacherClassIds(tenant.id, user.id) };
+  return { all: true };
+}
+
+const isTeacherOnly = (tenant: TenantContext) =>
+  tenant.roles.includes('teacher') && !tenant.roles.includes('admin') && !tenant.permissions.has('*');
+
+const canSee = (access: Access, classId: bigint) => access.all || access.classIds.some((c) => c === classId);
+
+async function loadNote(tenantId: bigint, id: bigint) {
+  const [row] = await db
+    .select()
+    .from(classNotes)
+    .where(and(eq(classNotes.id, id), eq(classNotes.tenantId, tenantId), isNull(classNotes.deletedAt)))
+    .limit(1);
+  if (!row) throw new HttpError(404, 'Note not found');
+  return row;
+}
+
+// ---------------------------------------------------------------- the routes
+export const notesRouter = Router();
+
+// The raw file arrives as the request body.
+const rawFile = express.raw({ type: () => true, limit: MAX_NOTE_BYTES });
+function readFileBody(req: Request, res: Response, next: NextFunction): void {
+  rawFile(req, res, (err?: unknown) => {
+    if ((err as { type?: string } | undefined)?.type === 'entity.too.large') {
+      next(new HttpError(413, 'The file is larger than 10 MB'));
+      return;
+    }
+    next(err);
+  });
+}
+
+// POST /api/notes/upload?filename=chapter1.pdf  (the file bytes as the body) -> { id }
+notesRouter.post('/upload', requirePermission('homework.create'), readFileBody, async (req, res) => {
+  const tenant = currentTenant(req);
+  const user = currentUser(req);
+  const name = z.string().trim().min(1).max(200).parse(req.query.filename);
+  const ext = path.extname(name).slice(1).toLowerCase();
+  if (!ext) throw new HttpError(400, 'The file name needs an extension such as .pdf');
+  if (!Buffer.isBuffer(req.body) || req.body.length === 0) throw new HttpError(400, 'The file is empty');
+
+  const mime = sniffDocument(req.body, ext);
+  if (!mime) throw new HttpError(400, 'Allowed files: PDF, Word, PowerPoint, Excel, or JPG / PNG / WebP images');
+
+  const storageKey = `${tenant.id}/${randomUUID()}.${ext}`;
+  const absolute = path.join(UPLOAD_ROOT, storageKey);
+  await mkdir(path.dirname(absolute), { recursive: true });
+  await writeFile(absolute, req.body);
+
+  const [row] = await db
+    .insert(files)
+    .values({
+      tenantId: tenant.id,
+      purpose: NOTE_PURPOSE,
+      originalName: safeName(name),
+      mimeType: mime,
+      sizeBytes: req.body.length,
+      storageKey,
+      uploadedBy: user.id,
+    })
+    .returning();
+
+  created(res, { id: String(row.id), originalName: row.originalName, mimeType: row.mimeType, sizeBytes: row.sizeBytes });
+});
+
+// GET /api/notes/my-classes -> the classes this person may add notes to (a teacher: theirs; an admin: all)
+notesRouter.get('/my-classes', requirePermission('homework.create'), async (req, res) => {
+  const tenant = currentTenant(req);
+  const access = await accessFor(tenant, currentUser(req));
+  if (!access.all && access.classIds.length === 0) {
+    ok(res, []);
+    return;
+  }
+  const rows = await db
+    .select({ id: classes.id, name: classes.name })
+    .from(classes)
+    .where(
+      and(
+        eq(classes.tenantId, tenant.id),
+        isNull(classes.deletedAt),
+        access.all ? undefined : inArray(classes.id, access.classIds),
+      ),
+    )
+    .orderBy(asc(classes.gradeLevel), asc(classes.name));
+  ok(res, rows.map((r) => ({ id: String(r.id), name: r.name })));
+});
+
+// GET /api/notes (?classId=) -> the notes this person may see, newest first
+notesRouter.get('/', requirePermission('homework.view'), async (req, res) => {
+  const tenant = currentTenant(req);
+  const user = currentUser(req);
+  const { classId } = z.object({ classId: z.coerce.bigint().positive().optional() }).parse(req.query);
+
+  const access = await accessFor(tenant, user);
+  if (!access.all && access.classIds.length === 0) {
+    ok(res, []);
+    return;
+  }
+
+  const rows = await db
+    .select({
+      id: classNotes.id,
+      title: classNotes.title,
+      description: classNotes.description,
+      className: classes.name,
+      subjectName: subjects.name,
+      uploadedByName: users.fullName,
+      fileName: files.originalName,
+      mimeType: files.mimeType,
+      sizeBytes: files.sizeBytes,
+      createdAt: classNotes.createdAt,
+      classId: classNotes.classId,
+      uploadedBy: classNotes.uploadedBy,
+    })
+    .from(classNotes)
+    .innerJoin(classes, eq(classNotes.classId, classes.id))
+    .innerJoin(files, eq(classNotes.fileId, files.id))
+    .leftJoin(subjects, eq(classNotes.subjectId, subjects.id))
+    .leftJoin(users, eq(classNotes.uploadedBy, users.id))
+    .where(
+      and(
+        eq(classNotes.tenantId, tenant.id),
+        isNull(classNotes.deletedAt),
+        access.all ? undefined : inArray(classNotes.classId, access.classIds),
+        classId ? eq(classNotes.classId, classId) : undefined,
+        isTeacherOnly(tenant) ? eq(classNotes.uploadedBy, user.id) : undefined,
+      ),
+    )
+    .orderBy(desc(classNotes.createdAt), desc(classNotes.id))
+    .limit(200);
+
+  ok(
+    res,
+    rows.map((r) => ({
+      id: String(r.id),
+      title: r.title,
+      description: r.description,
+      className: r.className,
+      subjectName: r.subjectName,
+      uploadedByName: r.uploadedByName,
+      fileName: r.fileName,
+      mimeType: r.mimeType,
+      sizeBytes: r.sizeBytes,
+      createdAt: r.createdAt,
+      classId: String(r.classId),
+      mine: r.uploadedBy !== null && r.uploadedBy === user.id,
+    })),
+  );
+});
+
+const createNoteSchema = z
+  .object({
+    classId: z.coerce.bigint().positive(),
+    subjectId: z.coerce.bigint().positive().nullish(),
+    title: z.string().trim().min(1).max(200),
+    description: z.string().trim().max(2000).nullish(),
+    fileId: z.coerce.bigint().positive(), // from POST /api/notes/upload
+  })
+  .strict();
+
+// POST /api/notes -> add a note for a class
+notesRouter.post('/', requirePermission('homework.create'), async (req, res) => {
+  const tenant = currentTenant(req);
+  const user = currentUser(req);
+  const input = createNoteSchema.parse(req.body);
+
+  const access = await accessFor(tenant, user);
+  if (!canSee(access, input.classId)) throw new HttpError(403, 'You can add notes only to the classes you teach');
+
+  const [cls] = await db
+    .select({ id: classes.id })
+    .from(classes)
+    .where(and(eq(classes.id, input.classId), eq(classes.tenantId, tenant.id), isNull(classes.deletedAt)))
+    .limit(1);
+  if (!cls) throw new HttpError(400, 'Class not found in this school');
+
+  if (input.subjectId != null) {
+    const [taught] = await db
+      .select({ subjectId: classSubjects.subjectId })
+      .from(classSubjects)
+      .where(
+        and(
+          eq(classSubjects.tenantId, tenant.id),
+          eq(classSubjects.classId, input.classId),
+          eq(classSubjects.subjectId, input.subjectId),
+        ),
+      )
+      .limit(1);
+    if (!taught) throw new HttpError(400, 'That subject is not taught in this class');
+  }
+
+  const { row: file } = await locateFile(tenant, input.fileId);
+  if (file.purpose !== NOTE_PURPOSE) throw new HttpError(400, 'That file was not uploaded as a class note');
+
+  const [row] = await db
+    .insert(classNotes)
+    .values({
+      tenantId: tenant.id,
+      classId: input.classId,
+      subjectId: input.subjectId ?? null,
+      title: input.title,
+      description: input.description ?? null,
+      fileId: input.fileId,
+      uploadedBy: user.id,
+    })
+    .returning();
+  created(res, { id: String(row.id) });
+});
+
+// GET /api/notes/subjects?classId= -> the subjects this person may attach a note to, for that class
+notesRouter.get('/subjects', requirePermission('homework.create'), async (req, res) => {
+  const tenant = currentTenant(req);
+  const user = currentUser(req);
+  const { classId } = z.object({ classId: z.coerce.bigint().positive() }).parse(req.query);
+
+  const access = await accessFor(tenant, user);
+  if (!canSee(access, classId)) throw new HttpError(403, 'You can add notes only to the classes you teach');
+
+  // a teacher gets the subjects they teach in this class (falls back to all of the class's subjects, e.g. a class teacher)
+  let onlyIds: bigint[] | null = null;
+  if (isTeacherOnly(tenant)) {
+    const [me] = await db
+      .select({ id: staff.id })
+      .from(staff)
+      .where(and(eq(staff.tenantId, tenant.id), eq(staff.userId, user.id), isNull(staff.deletedAt)))
+      .limit(1);
+    if (me) {
+      const mine = await db
+        .selectDistinct({ subjectId: sectionTeachers.subjectId })
+        .from(sectionTeachers)
+        .innerJoin(sections, eq(sectionTeachers.sectionId, sections.id))
+        .where(
+          and(
+            eq(sectionTeachers.tenantId, tenant.id),
+            eq(sectionTeachers.teacherId, me.id),
+            eq(sections.classId, classId),
+            isNull(sections.deletedAt),
+          ),
+        );
+      if (mine.length > 0) onlyIds = mine.map((r) => r.subjectId);
+    }
+  }
+
+  const rows = await db
+    .select({ id: subjects.id, name: subjects.name })
+    .from(classSubjects)
+    .innerJoin(subjects, eq(classSubjects.subjectId, subjects.id))
+    .where(
+      and(
+        eq(classSubjects.tenantId, tenant.id),
+        eq(classSubjects.classId, classId),
+        onlyIds ? inArray(subjects.id, onlyIds) : undefined,
+      ),
+    )
+    .orderBy(asc(classSubjects.displayOrder), asc(subjects.name));
+  ok(res, rows.map((r) => ({ id: String(r.id), name: r.name })));
+});
+// GET /api/notes/:id/file -> the file itself (only people who may see that class)
+notesRouter.get('/:id/file', requirePermission('homework.view'), async (req, res, next) => {
+  const tenant = currentTenant(req);
+  const note = await loadNote(tenant.id, parseId(req.params.id));
+  const access = await accessFor(tenant, currentUser(req));
+  if (!canSee(access, note.classId)) throw new HttpError(404, 'Note not found');
+
+  if (isTeacherOnly(tenant) && note.uploadedBy !== currentUser(req).id) throw new HttpError(404, 'Note not found');
+  const { row, absolute } = await locateFile(tenant, note.fileId);
+  res.type(row.mimeType);
+  res.sendFile(
+    absolute,
+    {
+      headers: {
+        'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(row.originalName)}`,
+        'Cache-Control': 'private, max-age=3600',
+      },
+    },
+    (err) => {
+      if (err && !res.headersSent) next(new HttpError(404, 'File not found'));
+    },
+  );
+});
+
+// DELETE /api/notes/:id -> remove a note (the uploader, or someone who may delete homework)
+notesRouter.delete('/:id', requirePermission('homework.create'), async (req, res) => {
+  const tenant = currentTenant(req);
+  const user = currentUser(req);
+  const note = await loadNote(tenant.id, parseId(req.params.id));
+  const access = await accessFor(tenant, user);
+  if (!canSee(access, note.classId)) throw new HttpError(404, 'Note not found');
+  if (!hasPermission(tenant, 'homework.delete') && note.uploadedBy !== user.id) {
+    throw new HttpError(403, 'You can delete only the notes you uploaded');
+  }
+  await db
+    .update(classNotes)
+    .set({ deletedAt: new Date() })
+    .where(and(eq(classNotes.id, note.id), eq(classNotes.tenantId, tenant.id)));
+  noContent(res);
+});

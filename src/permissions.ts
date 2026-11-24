@@ -10,7 +10,7 @@ export const MODULES = [
   'organization', 'members', 'roles',
   // new modules ('staff' replaces 'teachers' and covers teaching + non-teaching staff)
   'staff', 'subjects', 'classes', 'timetable', 'homework', 'calendar',
-  'leaves', 'expenses', 'transport', 'assets', 'gatepass',
+  'leaves', 'expenses', 'transport', 'assets', 'gatepass', 'library',
 ];
 
 export interface PermissionDef {
@@ -42,6 +42,8 @@ export const all = (module: string): string[] => ACTIONS.map((a) => module + '.'
 
 // Everybody in a school may open the dashboard and see basic details of their own school.
 const dashboardOnly = ['dashboard.view', 'organization.view'];
+// what every non-teaching staff member needs: the calendar and their own leave
+const staffCommon = ['calendar.view', 'leaves.view', 'leaves.create'];
 
 export const DEFAULT_ROLES: RoleDef[] = [
   // owner has NO rows: it is a wildcard in code (see lib/tenant.ts), so new permissions apply automatically.
@@ -71,7 +73,7 @@ export const DEFAULT_ROLES: RoleDef[] = [
     code: 'accountant',
     name: 'Accountant',
     description: 'Manages fees, expenses and finance.',
-    permissions: [...dashboardOnly, 'students.view', ...all('finance'), ...all('expenses')],
+    permissions: [...dashboardOnly, 'students.view', ...all('finance'), ...all('expenses'), ...staffCommon],
   },
   {
     code: 'receptionist',
@@ -80,7 +82,7 @@ export const DEFAULT_ROLES: RoleDef[] = [
     permissions: [
       ...dashboardOnly, 'students.view',
       'admissions.view', 'admissions.create', 'admissions.edit',
-      'gatepass.view', 'gatepass.create',
+      'gatepass.view', 'gatepass.create', ...staffCommon,
     ],
   },
   {
@@ -105,19 +107,20 @@ export const DEFAULT_ROLES: RoleDef[] = [
       'finance.view',
     ],
   },
-  { code: 'librarian', name: 'Librarian', description: 'Runs the library.', permissions: dashboardOnly },
-  { code: 'warden', name: 'Warden', description: 'Runs the hostel.', permissions: dashboardOnly },
+  { code: 'staff', name: 'Staff', description: 'Other non-teaching staff.', permissions: [...dashboardOnly, ...staffCommon] },
+  { code: 'librarian', name: 'Librarian', description: 'Runs the library.', permissions: [...dashboardOnly, 'students.view', ...all('library'), ...staffCommon] },
+  { code: 'warden', name: 'Warden', description: 'Runs the hostel.', permissions: [...dashboardOnly, ...staffCommon] },
   {
     code: 'transport_manager',
     name: 'Transport manager',
     description: 'Runs school transport.',
-    permissions: [...dashboardOnly, ...all('transport')],
+    permissions: [...dashboardOnly, ...all('transport'), ...staffCommon],
   },
-  { code: 'nurse', name: 'Nurse', description: 'School health room.', permissions: dashboardOnly },
+  { code: 'nurse', name: 'Nurse', description: 'School health room.', permissions: [...dashboardOnly, ...staffCommon] },
   {
     code: 'security',
     name: 'Security',
     description: 'Gate and campus security.',
-    permissions: [...dashboardOnly, ...all('gatepass'), 'attendance.view'],
+    permissions: [...dashboardOnly, ...all('gatepass'), 'attendance.view', ...staffCommon],
   },
 ];

@@ -1,0 +1,209 @@
+import { Router } from 'express';
+import { sql } from 'drizzle-orm';
+import { z } from 'zod';
+import { db } from '../../db';
+import { HttpError } from '../../lib/errors';
+import { parseId } from '../../lib/bigint';
+import { created, noContent, ok } from '../../lib/respond';
+import { currentTenant } from '../../middleware/authenticate';
+import { requirePermission } from '../../middleware/requirePermission';
+
+// ---- library rules: change these two numbers to suit the school ----
+const LOAN_DAYS = 14; // default loan period
+const FINE_PER_DAY = 2; // rupees per overdue day, charged when the book comes back
+
+const rowsOf = (r: any): any[] => (Array.isArray(r) ? r : r?.rows ?? []);
+const tidOf = (req: any) => String(currentTenant(req).id);
+const text = (max: number) => z.string().trim().min(1).max(max);
+const id = z.coerce.bigint().positive();
+const isoDate = z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD');
+const nonEmpty = (v: object) => Object.keys(v).length > 0;
+
+// ================================================================ BOOKS
+const bookFields = {
+  title: text(200),
+  author: text(150).nullish(),
+  isbn: text(40).nullish(),
+  category: text(80).nullish(),
+  shelf: text(40).nullish(),
+  copies: z.coerce.number().int().min(1).max(10000),
+};
+const createBookSchema = z.object({ ...bookFields, copies: bookFields.copies.default(1) }).strict();
+const updateBookSchema = z.object(bookFields).partial().strict().refine(nonEmpty, 'Nothing to change');
+const BOOK_COLS: Record<string, string> = { title: 'title', author: 'author', isbn: 'isbn', category: 'category', shelf: 'shelf', copies: 'copies' };
+
+const bookSelect = sql`b.id::text as id, b.title, b.author, b.isbn, b.category, b.shelf, b.copies,
+  (b.copies - (select count(*) from library_issues i where i.book_id = b.id and i.status = 'issued'))::int as available`;
+
+async function getBook(t: string, bookId: string) {
+  const [row] = rowsOf(await db.execute(sql`select ${bookSelect} from library_books b where b.id = ${bookId}::bigint and b.tenant_id = ${t}::bigint`));
+  if (!row) throw new HttpError(404, 'Book not found');
+  return row;
+}
+
+export const libraryBooksRouter = Router();
+
+libraryBooksRouter.get('/', requirePermission('library.view'), async (req, res) => {
+  const t = tidOf(req);
+  const q = typeof req.query.q === 'string' && req.query.q.trim() ? `%${req.query.q.trim()}%` : null;
+  const rows = rowsOf(
+    await db.execute(sql`select ${bookSelect} from library_books b
+      where b.tenant_id = ${t}::bigint
+        and (${q}::text is null or b.title ilike ${q}::text or b.author ilike ${q}::text or b.isbn ilike ${q}::text)
+      order by b.title, b.id limit 300`),
+  );
+  ok(res, rows, { total: rows.length });
+});
+
+libraryBooksRouter.get('/:id', requirePermission('library.view'), async (req, res) => {
+  ok(res, await getBook(tidOf(req), String(parseId(req.params.id))));
+});
+
+libraryBooksRouter.post('/', requirePermission('library.create'), async (req, res) => {
+  const t = tidOf(req);
+  const b = createBookSchema.parse(req.body);
+  const [row] = rowsOf(
+    await db.execute(sql`insert into library_books (tenant_id, title, author, isbn, category, shelf, copies)
+      values (${t}::bigint, ${b.title}, ${b.author ?? null}, ${b.isbn ?? null}, ${b.category ?? null}, ${b.shelf ?? null}, ${b.copies})
+      returning id::text as id`),
+  );
+  created(res, await getBook(t, row.id));
+});
+
+libraryBooksRouter.patch('/:id', requirePermission('library.edit'), async (req, res) => {
+  const t = tidOf(req);
+  const bookId = String(parseId(req.params.id));
+  const data = updateBookSchema.parse(req.body) as Record<string, unknown>;
+  const current = await getBook(t, bookId);
+  if (data.copies !== undefined) {
+    const out = Number(current.copies) - Number(current.available);
+    if (Number(data.copies) < out) throw new HttpError(400, `${out} copies are currently issued, so copies cannot be less than that`);
+  }
+  const parts = Object.entries(data)
+    .filter(([k, v]) => v !== undefined && BOOK_COLS[k])
+    .map(([k, v]) => sql`${sql.raw(BOOK_COLS[k])} = ${v as any}`);
+  if (parts.length) {
+    await db.execute(sql`update library_books set ${sql.join(parts, sql`, `)} where id = ${bookId}::bigint and tenant_id = ${t}::bigint`);
+  }
+  ok(res, await getBook(t, bookId));
+});
+
+libraryBooksRouter.delete('/:id', requirePermission('library.delete'), async (req, res) => {
+  const t = tidOf(req);
+  const bookId = String(parseId(req.params.id));
+  await getBook(t, bookId);
+  const [used] = rowsOf(await db.execute(sql`select count(*)::int as n from library_issues where book_id = ${bookId}::bigint and tenant_id = ${t}::bigint`));
+  if (Number(used?.n) > 0) throw new HttpError(409, 'This book has issue history and cannot be deleted');
+  await db.execute(sql`delete from library_books where id = ${bookId}::bigint and tenant_id = ${t}::bigint`);
+  noContent(res);
+});
+
+// ================================================================ ISSUE / RETURN
+const createIssueSchema = z
+  .object({
+    bookId: id,
+    studentId: id,
+    issuedOn: isoDate.nullish(),
+    dueOn: isoDate.nullish(),
+    remarks: text(300).nullish(),
+  })
+  .strict();
+const updateIssueSchema = z
+  .object({ dueOn: isoDate.nullish(), remarks: text(300).nullish() })
+  .strict()
+  .refine(nonEmpty, 'Nothing to change');
+
+const issueSelect = sql`i.id::text as id, i.book_id::text as "bookId", b.title as "bookTitle",
+  i.student_id::text as "studentId",
+  (s.full_name || coalesce(' - ' || s.admission_no, '')) as borrower,
+  (b.title || ' - ' || s.full_name) as title,
+  to_char(i.issued_on, 'YYYY-MM-DD') as "issuedOn", to_char(i.due_on, 'YYYY-MM-DD') as "dueOn",
+  to_char(i.returned_on, 'YYYY-MM-DD') as "returnedOn", i.fine::float as fine, i.status, i.remarks,
+  (i.status = 'issued' and i.due_on < current_date) as overdue`;
+const issueFrom = sql`from library_issues i join library_books b on b.id = i.book_id left join students s on s.id = i.student_id`;
+
+async function getIssue(t: string, issueId: string) {
+  const [row] = rowsOf(await db.execute(sql`select ${issueSelect} ${issueFrom} where i.id = ${issueId}::bigint and i.tenant_id = ${t}::bigint`));
+  if (!row) throw new HttpError(404, 'Issue record not found');
+  return row;
+}
+
+export const libraryIssuesRouter = Router();
+
+libraryIssuesRouter.get('/', requirePermission('library.view'), async (req, res) => {
+  const t = tidOf(req);
+  const st = ['issued', 'returned', 'overdue'].includes(String(req.query.status)) ? String(req.query.status) : null;
+  const rows = rowsOf(
+    await db.execute(sql`select ${issueSelect} ${issueFrom}
+      where i.tenant_id = ${t}::bigint
+        and (${st}::text is null
+          or (${st}::text = 'overdue' and i.status = 'issued' and i.due_on < current_date)
+          or (${st}::text <> 'overdue' and i.status = ${st}::text))
+      order by (i.status = 'issued') desc, i.due_on asc, i.id desc limit 300`),
+  );
+  ok(res, rows, { total: rows.length });
+});
+
+libraryIssuesRouter.get('/:id', requirePermission('library.view'), async (req, res) => {
+  ok(res, await getIssue(tidOf(req), String(parseId(req.params.id))));
+});
+
+libraryIssuesRouter.post('/', requirePermission('library.create'), async (req, res) => {
+  const t = tidOf(req);
+  const b = createIssueSchema.parse(req.body);
+  const bookId = String(b.bookId);
+  const studentId = String(b.studentId);
+
+  const [book] = rowsOf(
+    await db.execute(sql`select (bk.copies - (select count(*) from library_issues i where i.book_id = bk.id and i.status = 'issued'))::int as free
+      from library_books bk where bk.id = ${bookId}::bigint and bk.tenant_id = ${t}::bigint`),
+  );
+  if (!book) throw new HttpError(400, 'Book not found in this school');
+  if (Number(book.free) <= 0) throw new HttpError(409, 'No copy of this book is available right now');
+
+  const [stu] = rowsOf(await db.execute(sql`select id from students where id = ${studentId}::bigint and tenant_id = ${t}::bigint and deleted_at is null`));
+  if (!stu) throw new HttpError(400, 'Student not found in this school');
+
+  const [row] = rowsOf(
+    await db.execute(sql`insert into library_issues (tenant_id, book_id, student_id, issued_on, due_on, remarks)
+      values (${t}::bigint, ${bookId}::bigint, ${studentId}::bigint,
+        coalesce(${b.issuedOn ?? null}::date, current_date),
+        coalesce(${b.dueOn ?? null}::date, coalesce(${b.issuedOn ?? null}::date, current_date) + ${LOAN_DAYS}::int),
+        ${b.remarks ?? null})
+      returning id::text as id`),
+  );
+  created(res, await getIssue(t, row.id));
+});
+
+libraryIssuesRouter.patch('/:id', requirePermission('library.edit'), async (req, res) => {
+  const t = tidOf(req);
+  const issueId = String(parseId(req.params.id));
+  const b = updateIssueSchema.parse(req.body);
+  await getIssue(t, issueId);
+  if (b.dueOn) await db.execute(sql`update library_issues set due_on = ${b.dueOn}::date where id = ${issueId}::bigint and tenant_id = ${t}::bigint`);
+  if (b.remarks !== undefined) await db.execute(sql`update library_issues set remarks = ${b.remarks} where id = ${issueId}::bigint and tenant_id = ${t}::bigint`);
+  ok(res, await getIssue(t, issueId));
+});
+
+libraryIssuesRouter.post('/:id/return', requirePermission('library.edit'), async (req, res) => {
+  const t = tidOf(req);
+  const issueId = String(parseId(req.params.id));
+  const [done] = rowsOf(
+    await db.execute(sql`update library_issues
+      set status = 'returned', returned_on = current_date, fine = greatest(0, current_date - due_on) * ${FINE_PER_DAY}::int
+      where id = ${issueId}::bigint and tenant_id = ${t}::bigint and status = 'issued' returning id`),
+  );
+  if (!done) {
+    await getIssue(t, issueId); // 404 if it does not exist
+    throw new HttpError(409, 'This book is already returned');
+  }
+  ok(res, await getIssue(t, issueId));
+});
+
+libraryIssuesRouter.delete('/:id', requirePermission('library.delete'), async (req, res) => {
+  const t = tidOf(req);
+  const issueId = String(parseId(req.params.id));
+  await getIssue(t, issueId);
+  await db.execute(sql`delete from library_issues where id = ${issueId}::bigint and tenant_id = ${t}::bigint`);
+  noContent(res);
+});

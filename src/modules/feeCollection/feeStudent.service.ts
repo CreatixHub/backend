@@ -1,0 +1,250 @@
+import crypto from 'node:crypto';
+import { and, asc, desc, eq, inArray, isNull } from 'drizzle-orm';
+import { db } from '../../db';
+import { admissions, classes, feeTypes, invoiceLines, invoices, payments, students } from '../../db/schema';
+import { HttpError } from '../../lib/errors';
+import { isUniqueViolation } from '../../lib/pgErrors';
+import type { TenantContext } from '../../lib/tenant';
+import type { AuthUser } from '../../middleware/authenticate';
+import { notifyUsers } from '../notifications/notifications.service';
+
+// STUDENT FEES + UPI PAYMENTS.
+// What a student owes = all their invoices (not void) minus the payments that are CLEARED.
+// Cleared money is applied to the oldest due date first, so each invoice shows its own paid / balance.
+// A student pays through any UPI app (GPay...), then enters the UPI reference number (UTR).
+// That payment waits as "pending" until the admin checks it against the bank and approves it.
+
+const money = (n: number) => Number(n.toFixed(2));
+const todayStr = () => new Date().toISOString().slice(0, 10);
+
+export async function myStudent(tenant: TenantContext, actor: AuthUser) {
+  const [me] = await db
+    .select({ id: students.id, admissionNo: students.admissionNo, fullName: students.fullName, firstName: students.firstName })
+    .from(students)
+    .where(and(eq(students.tenantId, tenant.id), eq(students.userId, actor.id), isNull(students.deletedAt)))
+    .limit(1);
+  if (!me) throw new HttpError(404, 'No student record is linked to this login');
+  return me;
+}
+
+export async function ledger(tenantId: bigint, studentId: bigint) {
+  const invs = await db
+    .select()
+    .from(invoices)
+    .where(and(eq(invoices.tenantId, tenantId), eq(invoices.studentId, studentId)))
+    .orderBy(asc(invoices.dueOn), asc(invoices.id));
+  const live = invs.filter((i) => i.status !== 'void');
+
+  const ids = live.map((i) => i.id);
+  const lines = ids.length
+    ? await db
+        .select()
+        .from(invoiceLines)
+        .where(and(eq(invoiceLines.tenantId, tenantId), inArray(invoiceLines.invoiceId, ids)))
+        .orderBy(asc(invoiceLines.id))
+    : [];
+
+  const typeIds = [...new Set(lines.map((l) => l.feeTypeId).filter((x): x is bigint => x !== null))];
+  const types = typeIds.length
+    ? await db.select({ id: feeTypes.id, name: feeTypes.name }).from(feeTypes).where(inArray(feeTypes.id, typeIds))
+    : [];
+  const typeName = new Map(types.map((t) => [String(t.id), t.name]));
+
+  const pays = await db
+    .select()
+    .from(payments)
+    .where(and(eq(payments.tenantId, tenantId), eq(payments.studentId, studentId)))
+    .orderBy(desc(payments.receivedAt), desc(payments.id));
+
+  const cleared = pays.filter((p) => p.status === 'cleared').reduce((s, p) => s + Number(p.amount), 0);
+  const pending = pays.filter((p) => p.status === 'pending').reduce((s, p) => s + Number(p.amount), 0);
+
+  let remaining = cleared;
+  const today = todayStr();
+  const rows = live.map((inv) => {
+    const mine = lines.filter((l) => l.invoiceId === inv.id);
+    const total = mine.reduce((s, l) => s + Number(l.lineTotal), 0);
+    const paid = Math.min(total, Math.max(remaining, 0));
+    remaining -= paid;
+    const balance = money(total - paid);
+    const status = balance <= 0 ? 'paid' : paid > 0 ? 'partially_paid' : inv.dueOn < today ? 'overdue' : 'issued';
+    return {
+      id: String(inv.id),
+      number: inv.number,
+      dueOn: inv.dueOn,
+      status,
+      total: money(total),
+      paid: money(paid),
+      balance,
+      items: mine.map((l) => ({
+        name: (l.feeTypeId !== null ? typeName.get(String(l.feeTypeId)) : null) ?? l.lineType,
+        amount: money(Number(l.lineTotal)),
+      })),
+      _row: inv,
+    };
+  });
+
+  const billed = money(rows.reduce((s, r) => s + r.total, 0));
+  const balance = money(rows.reduce((s, r) => s + r.balance, 0));
+  return { rows, pays, billed, cleared: money(cleared), pending: money(pending), balance };
+}
+
+// Keep the invoices' own status column in step with the money received.
+export async function syncInvoiceStatuses(tenantId: bigint, studentId: bigint) {
+  const l = await ledger(tenantId, studentId);
+  for (const r of l.rows) {
+    if (r._row.status !== r.status && ['paid', 'partially_paid', 'issued', 'overdue'].includes(r.status)) {
+      await db
+        .update(invoices)
+        .set({ status: r.status })
+        .where(and(eq(invoices.id, r._row.id), eq(invoices.tenantId, tenantId)));
+    }
+  }
+}
+
+// ------------------------------------------------------------------ the signed-in student
+export async function getMyFees(tenant: TenantContext, actor: AuthUser) {
+  const me = await myStudent(tenant, actor);
+  const l = await ledger(tenant.id, me.id);
+
+  // the note GPay shows: student name, class and admission number
+  const [cls] = await db
+    .select({ name: classes.name })
+    .from(admissions)
+    .innerJoin(classes, eq(admissions.classId, classes.id))
+    .where(and(eq(admissions.tenantId, tenant.id), eq(admissions.studentId, me.id), isNull(admissions.deletedAt)))
+    .limit(1);
+  const clean = (s: string) => s.replace(/[^A-Za-z0-9 .-]/g, ' ').replace(/\s+/g, ' ').trim();
+  const note = clean(`Fees ${me.fullName || me.firstName} ${cls?.name ?? ''} Adm ${me.admissionNo}`).slice(0, 50);
+
+  const vpa = process.env.SCHOOL_UPI_ID?.trim() || null;
+  const payable = money(Math.max(l.balance - l.pending, 0));
+
+  return {
+    student: { id: String(me.id), admissionNo: me.admissionNo, name: me.fullName || me.firstName },
+    summary: { billed: l.billed, paid: l.cleared, pending: l.pending, balance: l.balance, payable },
+    invoices: l.rows.map(({ _row, ...r }) => r),
+    payments: l.pays.slice(0, 20).map((p) => ({
+      id: String(p.id),
+      receiptNo: p.receiptNo,
+      amount: money(Number(p.amount)),
+      method: p.method,
+      status: p.status,
+      referenceNo: p.referenceNo,
+      receivedAt: p.receivedAt,
+    })),
+    // null until the school's UPI id is set in the backend .env (SCHOOL_UPI_ID)
+    upi: vpa
+      ? {
+          vpa,
+          name: process.env.SCHOOL_PAYEE_NAME?.trim() || tenant.name || 'School',
+          note,
+        }
+      : null,
+  };
+}
+
+// The student paid in GPay (or any UPI app) and now reports it. It stays pending until the admin approves.
+export async function submitMyPayment(
+  tenant: TenantContext,
+  actor: AuthUser,
+  input: { amount: number; referenceNo: string },
+) {
+  const me = await myStudent(tenant, actor);
+  const l = await ledger(tenant.id, me.id);
+  const payable = money(Math.max(l.balance - l.pending, 0));
+  const amount = money(input.amount);
+
+  if (payable <= 0) throw new HttpError(400, 'You have no fees due right now');
+  if (amount > payable) throw new HttpError(400, `The amount cannot be more than the fees due (${payable.toFixed(2)})`);
+
+  try {
+    const [row] = await db
+      .insert(payments)
+      .values({
+        tenantId: tenant.id,
+        receiptNo: `RCP-${new Date().getFullYear()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`,
+        studentId: me.id,
+        amount: amount.toFixed(2),
+        method: 'upi',
+        receivedAt: new Date(),
+        receivedBy: actor.id,
+        status: 'pending',
+        referenceNo: input.referenceNo.toUpperCase(),
+      })
+      .returning();
+    return { id: String(row.id), receiptNo: row.receiptNo, amount, status: row.status, referenceNo: row.referenceNo };
+  } catch (e) {
+    if (isUniqueViolation(e)) throw new HttpError(409, 'That UPI reference number was already submitted');
+    throw e;
+  }
+}
+
+// ------------------------------------------------------------------ admin: check and approve
+export async function listPendingPayments(tenant: TenantContext) {
+  const rows = await db
+    .select({
+      id: payments.id,
+      receiptNo: payments.receiptNo,
+      studentId: payments.studentId,
+      studentName: students.fullName,
+      firstName: students.firstName,
+      admissionNo: students.admissionNo,
+      amount: payments.amount,
+      method: payments.method,
+      referenceNo: payments.referenceNo,
+      receivedAt: payments.receivedAt,
+    })
+    .from(payments)
+    .innerJoin(students, eq(payments.studentId, students.id))
+    .where(and(eq(payments.tenantId, tenant.id), eq(payments.status, 'pending')))
+    .orderBy(asc(payments.receivedAt))
+    .limit(100);
+  return rows.map((r) => ({
+    id: String(r.id),
+    receiptNo: r.receiptNo,
+    studentId: String(r.studentId),
+    studentName: r.studentName || r.firstName,
+    admissionNo: r.admissionNo,
+    amount: money(Number(r.amount)),
+    method: r.method,
+    referenceNo: r.referenceNo,
+    receivedAt: r.receivedAt,
+  }));
+}
+
+export async function reviewPayment(tenant: TenantContext, id: bigint, decision: 'approve' | 'reject') {
+  const [pay] = await db
+    .select()
+    .from(payments)
+    .where(and(eq(payments.id, id), eq(payments.tenantId, tenant.id)))
+    .limit(1);
+  if (!pay) throw new HttpError(404, 'Payment not found');
+  if (pay.status !== 'pending') throw new HttpError(400, `This payment is already ${pay.status}`);
+
+  const status = decision === 'approve' ? 'cleared' : 'bounced';
+  await db.update(payments).set({ status }).where(and(eq(payments.id, id), eq(payments.tenantId, tenant.id)));
+  await syncInvoiceStatuses(tenant.id, pay.studentId);
+
+  const [kid] = await db
+    .select({ userId: students.userId })
+    .from(students)
+    .where(and(eq(students.id, pay.studentId), eq(students.tenantId, tenant.id)))
+    .limit(1);
+  if (kid?.userId) {
+    const amt = Number(pay.amount).toFixed(2);
+    await notifyUsers(tenant.id, [
+      {
+        userId: kid.userId,
+        type: decision === 'approve' ? 'fee_payment_approved' : 'fee_payment_rejected',
+        title: decision === 'approve' ? 'Payment received' : 'Payment not verified',
+        body:
+          decision === 'approve'
+            ? `Your fee payment of Rs ${amt} (receipt ${pay.receiptNo}) was received. Thank you.`
+            : `We could not verify your payment of Rs ${amt} (ref ${pay.referenceNo ?? '-'}). Please contact the school office.`,
+        data: { paymentId: String(pay.id), status },
+      },
+    ]);
+  }
+  return { id: String(pay.id), status };
+}

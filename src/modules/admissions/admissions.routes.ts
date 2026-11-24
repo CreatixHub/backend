@@ -3,6 +3,7 @@ import { parseId } from '../../lib/bigint';
 import { created, noContent, ok } from '../../lib/respond';
 import { currentTenant, currentUser } from '../../middleware/authenticate';
 import { requirePermission } from '../../middleware/requirePermission';
+import { adminDecision } from '../../middleware/adminDecision';
 import {
   acceptAdmissionSchema,
   changeAdmissionStatusSchema,
@@ -36,12 +37,12 @@ admissionsRouter.patch('/:id', requirePermission('admissions.edit'), async (req,
   ok(res, await svc.updateAdmission(currentTenant(req), currentUser(req), parseId(req.params.id), input));
 });
 
-admissionsRouter.post('/:id/status', requirePermission('admissions.edit'), async (req, res) => {
+admissionsRouter.post('/:id/status', requirePermission('admissions.edit'), adminDecision, async (req, res) => {
   const input = changeAdmissionStatusSchema.parse(req.body);
   ok(res, await svc.changeAdmissionStatus(currentTenant(req), currentUser(req), parseId(req.params.id), input));
 });
 
-admissionsRouter.post('/:id/accept', requirePermission('admissions.edit'), async (req, res) => {
+admissionsRouter.post('/:id/accept', requirePermission('admissions.edit'), adminDecision, async (req, res) => {
   const input = acceptAdmissionSchema.parse(req.body ?? {});
   ok(res, await svc.acceptAdmission(currentTenant(req), currentUser(req), parseId(req.params.id), input));
 });

@@ -766,10 +766,10 @@ export async function createLeaveRequest(tenant: TenantContext, user: AuthUser, 
       .where(and(eq(leaveTypes.id, data.leaveTypeId), eq(leaveTypes.tenantId, tenant.id)))
       .limit(1);
     if (!lt || !lt.isActive) throw new HttpError(400, 'Leave type not found or inactive');
-    if (isStudent && lt.applicableTo === 'staff') {
+    if (isStudent && !['student', 'both'].includes(lt.applicableTo)) {
       throw new HttpError(400, 'This leave type is only applicable to staff');
     }
-    if (!isStudent && lt.applicableTo === 'student') {
+    if (!isStudent && !['staff', 'both', 'teaching', 'non_teaching'].includes(lt.applicableTo)) {
       throw new HttpError(400, 'This leave type is only applicable to students');
     }
     if (lt.requiresDocument && data.documentFileId == null) {
