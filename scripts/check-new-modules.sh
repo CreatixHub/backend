@@ -39,6 +39,7 @@ echo "== sign in as an owner (owner role = wildcard permission, so every module 
 req POST /auth/signup "" "{\"fullName\":\"Owner\",\"email\":\"$EA\",\"password\":\"Temp-pass-12345\"}"; check "signup" 201 "$CODE"; T0=$(echo "$BODY" | j data.accessToken)
 req POST /organizations "$T0" "{\"name\":\"Test School\",\"slug\":\"$SA\"}"; check "create school" 201 "$CODE"
 req POST /auth/switch-organization "$T0" "{\"organization\":\"$SA\"}"; check "switch into school" 200 "$CODE"; T=$(echo "$BODY" | j data.accessToken)
+req GET /academic-years/current "$T"; check "the new school has a current academic year" 200 "$CODE"; YEAR1=$(echo "$BODY" | j data.id)
 
 echo "== Staff"
 req POST /staff "$T" '{"firstName":"Priya","lastName":"Nair","staffType":"teaching","employmentType":"full_time","joinedOn":"2026-06-01"}'
@@ -76,18 +77,18 @@ echo "== Timetable (time slots, section teachers, entries)"
 req POST /time-slots "$T" '{"name":"Period 1","sequence":1,"startsAt":"09:00","endsAt":"09:40"}'
 check "create time slot" 201 "$CODE"; SLOT1=$(echo "$BODY" | j data.id)
 req POST /time-slots "$T" '{"name":"Bad","sequence":2,"startsAt":"09:40","endsAt":"09:00"}'; check "endsAt before startsAt -> 400" 400 "$CODE"
-req POST /section-teachers "$T" "{\"sectionId\":\"$SECTION1\",\"subjectId\":\"$SUBJECT1\",\"academicYearId\":\"1\",\"teacherId\":\"$STAFF1\"}"
+req POST /section-teachers "$T" "{\"sectionId\":\"$SECTION1\",\"subjectId\":\"$SUBJECT1\",\"academicYearId\":\"$YEAR1\",\"teacherId\":\"$STAFF1\"}"
 check "assign teacher to section+subject" 201 "$CODE"
-req POST /timetable "$T" "{\"sectionId\":\"$SECTION1\",\"subjectId\":\"$SUBJECT1\",\"timeSlotId\":\"$SLOT1\",\"dayOfWeek\":1,\"academicYearId\":\"1\",\"effectiveFrom\":\"2026-06-01\"}"
+req POST /timetable "$T" "{\"sectionId\":\"$SECTION1\",\"subjectId\":\"$SUBJECT1\",\"timeSlotId\":\"$SLOT1\",\"dayOfWeek\":1,\"academicYearId\":\"$YEAR1\",\"effectiveFrom\":\"2026-06-01\"}"
 check "create timetable entry" 201 "$CODE"; ENTRY1=$(echo "$BODY" | j data.id)
-req POST /timetable "$T" "{\"sectionId\":\"$SECTION1\",\"subjectId\":\"$SUBJECT1\",\"timeSlotId\":\"$SLOT1\",\"dayOfWeek\":1,\"academicYearId\":\"1\",\"effectiveFrom\":\"2026-06-01\"}"
+req POST /timetable "$T" "{\"sectionId\":\"$SECTION1\",\"subjectId\":\"$SUBJECT1\",\"timeSlotId\":\"$SLOT1\",\"dayOfWeek\":1,\"academicYearId\":\"$YEAR1\",\"effectiveFrom\":\"2026-06-01\"}"
 check "clashing entry (same section+slot+day) -> 409" 409 "$CODE"
 req GET "/timetable?sectionId=$SECTION1" "$T"; check "list entries for the section" 200 "$CODE"
 # classroomId is skipped here - classrooms have no CRUD endpoint of their own yet, so there's no real id to reference.
 req PATCH "/timetable/$ENTRY1" "$T" '{"effectiveTo":"2027-03-31"}'; check "update timetable entry" 200 "$CODE"
 
 echo "== Homework (LMS basic)"
-req POST /homework "$T" "{\"sectionId\":\"$SECTION1\",\"subjectId\":\"$SUBJECT1\",\"academicYearId\":\"1\",\"teacherId\":\"$STAFF1\",\"title\":\"Chapter 4 exercises\",\"assignedOn\":\"2026-11-20\",\"dueAt\":\"2026-11-27T17:00:00+05:30\"}"
+req POST /homework "$T" "{\"sectionId\":\"$SECTION1\",\"subjectId\":\"$SUBJECT1\",\"academicYearId\":\"$YEAR1\",\"teacherId\":\"$STAFF1\",\"title\":\"Chapter 4 exercises\",\"assignedOn\":\"2026-11-20\",\"dueAt\":\"2026-11-27T17:00:00+05:30\"}"
 check "create homework" 201 "$CODE"; HW1=$(echo "$BODY" | j data.id)
 has "starts as draft" '"status":"draft"' "$BODY"
 req POST "/homework/$HW1/publish" "$T"; check "publish homework" 200 "$CODE"; has "now published" '"status":"published"' "$BODY"
@@ -106,9 +107,9 @@ req POST /pickup-points "$T" "{\"routeId\":\"$ROUTE1\",\"name\":\"Market Square\
 check "create pickup point" 201 "$CODE"; POINT1=$(echo "$BODY" | j data.id)
 req POST /route-schedules "$T" "{\"routeId\":\"$ROUTE1\",\"vehicleId\":\"$VEHICLE1\",\"driverId\":\"$DRIVER1\",\"shift\":\"morning\",\"operatingDays\":[1,2,3,4,5],\"validFrom\":\"2026-06-01\",\"validTo\":\"2027-03-31\"}"
 check "create route schedule" 201 "$CODE"
-req POST /transport-assignments "$T" "{\"staffId\":\"$STAFF1\",\"academicYearId\":\"1\",\"routeId\":\"$ROUTE1\",\"pickupPointId\":\"$POINT1\"}"
+req POST /transport-assignments "$T" "{\"staffId\":\"$STAFF1\",\"academicYearId\":\"$YEAR1\",\"routeId\":\"$ROUTE1\",\"pickupPointId\":\"$POINT1\"}"
 check "assign staff to the route" 201 "$CODE"; ASSIGN1=$(echo "$BODY" | j data.id)
-req POST /transport-assignments "$T" "{\"staffId\":\"$STAFF1\",\"studentId\":\"901\",\"academicYearId\":\"1\",\"routeId\":\"$ROUTE1\",\"pickupPointId\":\"$POINT1\"}"
+req POST /transport-assignments "$T" "{\"staffId\":\"$STAFF1\",\"studentId\":\"901\",\"academicYearId\":\"$YEAR1\",\"routeId\":\"$ROUTE1\",\"pickupPointId\":\"$POINT1\"}"
 check "sending BOTH staffId and studentId -> 400" 400 "$CODE"
 req DELETE "/transport-assignments/$ASSIGN1" "$T"; check "end the assignment" 204 "$CODE"
 

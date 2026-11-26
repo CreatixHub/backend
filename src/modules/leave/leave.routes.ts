@@ -1,0 +1,761 @@
+import { Router } from 'express';
+import { z } from 'zod';
+import { and, asc, desc, eq, gte, inArray, isNull, lte, ne, sql } from 'drizzle-orm';
+import { db } from '../../db';
+import {
+  academicCalendarEvents,
+  academicYears,
+  attendanceRules,
+  leaveBalances,
+  leaveRequests,
+  leaveTypes,
+  staff,
+} from '../../db/schema';
+import { parseId } from '../../lib/bigint';
+import { HttpError } from '../../lib/errors';
+import { created, ok } from '../../lib/respond';
+import type { TenantContext } from '../../lib/tenant';
+import { currentTenant, currentUser } from '../../middleware/authenticate';
+import type { AuthUser } from '../../middleware/authenticate';
+import { decideLeaveRequest } from '../attendance/attendance.service';
+import { admissions, classTeachers, classes, students } from '../../db/schema';
+import { isNotNull } from 'drizzle-orm';
+import { resolveStudentScope } from '../../lib/ownership';
+import { resolveAcademicYearId } from '../academic-years/academicYears.service';
+
+export const leaveRouter = Router();
+
+const DAY = 86400000;
+const IST = 19800000;
+const parseD = (s: string) => new Date(s + 'T00:00:00Z');
+const fmtD = (d: Date) => d.toISOString().slice(0, 10);
+const isoWeekday = (d: Date) => (d.getUTCDay() === 0 ? 7 : d.getUTCDay());
+const istDate = (d: Date) => fmtD(new Date(d.getTime() + IST));
+const todayIst = () => istDate(new Date());
+
+const isoDate = z
+  .string()
+  .trim()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD')
+  .refine((v) => fmtD(parseD(v)) === v, 'Invalid date');
+
+const isAdmin = (tenant: TenantContext) => tenant.permissions.has('*') || tenant.roles.includes('admin');
+
+// which leave types a staff member can use: 'staff' / 'both' = everyone, 'teaching' / 'non_teaching' = that group only
+const STAFF_SIDE = ['staff', 'both', 'teaching', 'non_teaching'];
+const typeFits = (applicableTo: string, staffType: string | null | undefined) =>
+  applicableTo === 'staff' ||
+  applicableTo === 'both' ||
+  (applicableTo === 'teaching' && staffType === 'teaching') ||
+  (applicableTo === 'non_teaching' && staffType === 'non_teaching');
+
+async function myStaff(tenant: TenantContext, user: AuthUser) {
+  const [row] = await db
+    .select({ id: staff.id, fullName: staff.fullName, employeeNo: staff.employeeNo, staffType: staff.staffType })
+    .from(staff)
+    .where(and(eq(staff.tenantId, tenant.id), eq(staff.userId, user.id), isNull(staff.deletedAt)))
+    .limit(1);
+  if (!row) throw new HttpError(403, 'Your login is not linked to a staff record');
+  await ensureBalances(tenant, row.id, row.staffType);
+  return row;
+}
+
+// the school's current academic year (null only if the school has none set up)
+async function currentYearId(tenant: TenantContext): Promise<bigint | null> {
+  const [r] = await db
+    .select({ id: academicYears.id })
+    .from(academicYears)
+    .where(and(eq(academicYears.tenantId, tenant.id), eq(academicYears.isCurrent, true)))
+    .limit(1);
+  return r?.id ?? null;
+}
+
+async function yearForStaff(tenant: TenantContext, staffId: bigint): Promise<bigint | null> {
+  const [r] = await db
+    .select({ y: sql<string | null>`max(${leaveBalances.academicYearId})` })
+    .from(leaveBalances)
+    .where(and(eq(leaveBalances.tenantId, tenant.id), eq(leaveBalances.staffId, staffId)));
+  return r?.y == null ? currentYearId(tenant) : BigInt(r.y);
+}
+// every staff member (teaching or not) gets this year's balance for each quota leave type the first time they use leave
+async function ensureBalances(tenant: TenantContext, staffId: bigint, staffType: string | null) {
+  const year = (await yearForStaff(tenant, staffId)) ?? (await resolveAcademicYearId(tenant));
+  const types = await db
+    .select({ id: leaveTypes.id, quota: leaveTypes.annualQuota, applicableTo: leaveTypes.applicableTo })
+    .from(leaveTypes)
+    .where(and(eq(leaveTypes.tenantId, tenant.id), eq(leaveTypes.isActive, true), inArray(leaveTypes.applicableTo, STAFF_SIDE)));
+  for (const lt of types) {
+    if (lt.quota == null || !typeFits(lt.applicableTo, staffType)) continue;
+    await db
+      .insert(leaveBalances)
+      .values({ tenantId: tenant.id, staffId, leaveTypeId: lt.id, academicYearId: year, allocated: Number(lt.quota).toFixed(1), used: '0', carriedForward: '0' })
+      .onConflictDoNothing();
+  }
+}
+
+async function countDays(tenant: TenantContext, from: string, to: string, duration: 'full_day' | 'half_day', who: 'staff' | 'student' = 'staff') {
+  if (to < from) throw new HttpError(400, 'To date must be on or after From date');
+  const span = Math.round((parseD(to).getTime() - parseD(from).getTime()) / DAY) + 1;
+  if (span > 366) throw new HttpError(400, 'Leave period is too long');
+  if (duration === 'half_day' && from !== to) throw new HttpError(400, 'Half day leave must be a single date');
+
+  const [rule] = await db
+    .select({ w: attendanceRules.workingWeekdays })
+    .from(attendanceRules)
+    .where(
+      and(
+        eq(attendanceRules.tenantId, tenant.id),
+        eq(attendanceRules.audience, who),
+        eq(attendanceRules.isActive, true),
+        lte(attendanceRules.effectiveFrom, from),
+        gte(attendanceRules.effectiveTo, from),
+      ),
+    )
+    .orderBy(desc(attendanceRules.effectiveFrom))
+    .limit(1);
+  const working = new Set<number>(rule?.w && rule.w.length ? rule.w.map(Number) : [1, 2, 3, 4, 5, 6]);
+
+  const events = await db
+    .select({ title: academicCalendarEvents.title, s: academicCalendarEvents.startsAt, e: academicCalendarEvents.endsAt })
+    .from(academicCalendarEvents)
+    .where(
+      and(
+        eq(academicCalendarEvents.tenantId, tenant.id),
+        eq(academicCalendarEvents.eventType, 'holiday'),
+        inArray(academicCalendarEvents.audience, who === 'staff' ? ['all', 'staff'] : ['all', 'students']),
+        gte(academicCalendarEvents.endsAt, new Date(parseD(from).getTime() - IST)),
+        lte(academicCalendarEvents.startsAt, new Date(parseD(to).getTime() + DAY - IST)),
+      ),
+    );
+  const holidays = new Map<string, string>();
+  for (const ev of events) {
+    const endMs = ev.e.getTime() > ev.s.getTime() ? ev.e.getTime() - 1 : ev.e.getTime();
+    let cur = parseD(istDate(ev.s));
+    const last = parseD(istDate(new Date(endMs)));
+    while (cur <= last) {
+      holidays.set(fmtD(cur), ev.title);
+      cur = new Date(cur.getTime() + DAY);
+    }
+  }
+
+  const counted: string[] = [];
+  const skipped: { date: string; reason: string }[] = [];
+  for (let i = 0; i < span; i++) {
+    const d = new Date(parseD(from).getTime() + i * DAY);
+    const key = fmtD(d);
+    if (holidays.has(key)) skipped.push({ date: key, reason: holidays.get(key)! });
+    else if (!working.has(isoWeekday(d))) skipped.push({ date: key, reason: 'Weekly off' });
+    else counted.push(key);
+  }
+  if (counted.length === 0) throw new HttpError(400, 'All selected dates are holidays or weekly offs');
+  const days = duration === 'half_day' ? 0.5 : counted.length;
+  return { days, skipped, workingDates: counted };
+}
+
+async function pendingDays(tenant: TenantContext, staffId: bigint, leaveTypeId: bigint) {
+  const [p] = await db
+    .select({ s: sql<string>`coalesce(sum(${leaveRequests.days}),0)` })
+    .from(leaveRequests)
+    .where(
+      and(
+        eq(leaveRequests.tenantId, tenant.id),
+        eq(leaveRequests.staffId, staffId),
+        eq(leaveRequests.leaveTypeId, leaveTypeId),
+        eq(leaveRequests.status, 'pending'),
+      ),
+    );
+  return Number(p?.s ?? 0);
+}
+
+// ---------------------------------------------------------------- GET /me/summary
+leaveRouter.get('/me/summary', async (req, res) => {
+  const tenant = currentTenant(req);
+  const me = await myStaff(tenant, currentUser(req));
+  const year = await yearForStaff(tenant, me.id);
+
+  const types = await db
+    .select()
+    .from(leaveTypes)
+    .where(and(eq(leaveTypes.tenantId, tenant.id), eq(leaveTypes.isActive, true), inArray(leaveTypes.applicableTo, STAFF_SIDE)))
+    .orderBy(asc(leaveTypes.name));
+
+  const balRows = year == null
+    ? []
+    : await db
+        .select()
+        .from(leaveBalances)
+        .where(and(eq(leaveBalances.tenantId, tenant.id), eq(leaveBalances.staffId, me.id), eq(leaveBalances.academicYearId, year)));
+
+  const balances = [];
+  for (const t of types.filter((x) => typeFits(x.applicableTo, me.staffType))) {
+    const b = balRows.find((x) => x.leaveTypeId === t.id);
+    const pending = await pendingDays(tenant, me.id, t.id);
+    const allocated = b ? Number(b.allocated) : 0;
+    const carried = b ? Number(b.carriedForward) : 0;
+    const used = b ? Number(b.used) : 0;
+    balances.push({
+      leaveTypeId: t.id,
+      code: t.code,
+      name: t.name,
+      isPaid: t.isPaid,
+      requiresDocument: t.requiresDocument,
+      maxConsecutiveDays: t.maxConsecutiveDays,
+      tracked: t.annualQuota != null,
+      allocated,
+      carriedForward: carried,
+      used,
+      pending,
+      available: Math.max(0, allocated + carried - used - pending),
+    });
+  }
+
+  const requests = await db
+    .select({
+      id: leaveRequests.id,
+      leaveTypeId: leaveRequests.leaveTypeId,
+      typeName: leaveTypes.name,
+      fromDate: leaveRequests.fromDate,
+      toDate: leaveRequests.toDate,
+      days: leaveRequests.days,
+      durationType: leaveRequests.durationType,
+      reason: leaveRequests.reason,
+      status: leaveRequests.status,
+      decisionNotes: leaveRequests.decisionNotes,
+      decidedAt: leaveRequests.decidedAt,
+      createdAt: leaveRequests.createdAt,
+    })
+    .from(leaveRequests)
+    .leftJoin(leaveTypes, eq(leaveTypes.id, leaveRequests.leaveTypeId))
+    .where(and(eq(leaveRequests.tenantId, tenant.id), eq(leaveRequests.staffId, me.id)))
+    .orderBy(desc(leaveRequests.id))
+    .limit(50);
+
+  ok(res, { staff: me, academicYearId: year, balances, requests });
+});
+
+// ---------------------------------------------------------------- GET /preview
+leaveRouter.get('/preview', async (req, res) => {
+  const q = z
+    .object({ from: isoDate, to: isoDate, durationType: z.enum(['full_day', 'half_day']).default('full_day'), who: z.enum(['staff', 'student']).default('staff') })
+    .parse(req.query);
+  const r = await countDays(currentTenant(req), q.from, q.to, q.durationType, q.who);
+  ok(res, { days: r.days, skipped: r.skipped });
+});
+
+// ---------------------------------------------------------------- POST /apply
+const applySchema = z
+  .object({
+    leaveTypeId: z.coerce.bigint().positive(),
+    fromDate: isoDate,
+    toDate: isoDate,
+    durationType: z.enum(['full_day', 'half_day']).default('full_day'),
+    reason: z.string().trim().min(3).max(1000),
+    documentFileId: z.coerce.bigint().positive().nullish(),
+  })
+  .strict();
+
+leaveRouter.post('/apply', async (req, res) => {
+  const tenant = currentTenant(req);
+  const me = await myStaff(tenant, currentUser(req));
+  const body = applySchema.parse(req.body);
+
+  const [lt] = await db
+    .select()
+    .from(leaveTypes)
+    .where(and(eq(leaveTypes.id, body.leaveTypeId), eq(leaveTypes.tenantId, tenant.id)))
+    .limit(1);
+  if (!lt || !lt.isActive || !typeFits(lt.applicableTo, me.staffType)) throw new HttpError(400, 'Leave type not available for staff');
+  if (lt.requiresDocument && body.documentFileId == null) {
+    throw new HttpError(400, 'A supporting document is required for this leave type');
+  }
+
+  const { days } = await countDays(tenant, body.fromDate, body.toDate, body.durationType);
+  if (lt.maxConsecutiveDays != null && days > lt.maxConsecutiveDays) {
+    throw new HttpError(400, `This leave type allows at most ${lt.maxConsecutiveDays} days at a time`);
+  }
+
+  const overlap = await db
+    .select({ id: leaveRequests.id })
+    .from(leaveRequests)
+    .where(
+      and(
+        eq(leaveRequests.tenantId, tenant.id),
+        eq(leaveRequests.staffId, me.id),
+        inArray(leaveRequests.status, ['pending', 'approved']),
+        lte(leaveRequests.fromDate, body.toDate),
+        gte(leaveRequests.toDate, body.fromDate),
+      ),
+    )
+    .limit(1);
+  if (overlap.length) throw new HttpError(409, 'You already have a leave request overlapping these dates');
+
+  if (lt.annualQuota != null) {
+    const year = await yearForStaff(tenant, me.id);
+    const [bal] = year == null
+      ? []
+      : await db
+          .select()
+          .from(leaveBalances)
+          .where(
+            and(
+              eq(leaveBalances.tenantId, tenant.id),
+              eq(leaveBalances.staffId, me.id),
+              eq(leaveBalances.leaveTypeId, lt.id),
+              eq(leaveBalances.academicYearId, year),
+            ),
+          )
+          .limit(1);
+    if (!bal) throw new HttpError(400, 'No leave balance has been allocated to you for this type. Please contact the admin.');
+    const pending = await pendingDays(tenant, me.id, lt.id);
+    const available = Number(bal.allocated) + Number(bal.carriedForward) - Number(bal.used) - pending;
+    if (days > available) {
+      throw new HttpError(409, `Insufficient balance: ${Math.max(0, available).toFixed(1)} day(s) available, ${days} requested`);
+    }
+  }
+
+  const [row] = await db
+    .insert(leaveRequests)
+    .values({
+      tenantId: tenant.id,
+      staffId: me.id,
+      studentId: null,
+      leaveTypeId: lt.id,
+      requestedByUserId: currentUser(req).id,
+      fromDate: body.fromDate,
+      toDate: body.toDate,
+      days: days.toFixed(1),
+      durationType: body.durationType,
+      reason: body.reason,
+      documentFileId: body.documentFileId ?? null,
+      status: 'pending',
+    })
+    .returning();
+  created(res, { ...row, tenantId: undefined });
+});
+
+// ---------------------------------------------------------------- POST /:id/cancel  (own request)
+leaveRouter.post('/:id/cancel', async (req, res) => {
+  const tenant = currentTenant(req);
+  const me = await myStaff(tenant, currentUser(req));
+  const id = parseId(req.params.id);
+
+  const result = await db.transaction(async (tx) => {
+    const [lr] = await tx
+      .select()
+      .from(leaveRequests)
+      .where(and(eq(leaveRequests.id, id), eq(leaveRequests.tenantId, tenant.id), eq(leaveRequests.staffId, me.id)))
+      .limit(1);
+    if (!lr) throw new HttpError(404, 'Leave request not found');
+    if (lr.status === 'approved' && lr.fromDate <= todayIst()) {
+      throw new HttpError(409, 'This leave has already started. Please contact the admin.');
+    }
+    if (lr.status !== 'pending' && lr.status !== 'approved') {
+      throw new HttpError(409, `Cannot cancel a ${lr.status} leave request`);
+    }
+    if (lr.status === 'approved' && lr.leaveTypeId != null) {
+      const [y] = await tx
+        .select({ y: sql<string | null>`max(${leaveBalances.academicYearId})` })
+        .from(leaveBalances)
+        .where(and(eq(leaveBalances.tenantId, tenant.id), eq(leaveBalances.staffId, me.id)));
+      if (y?.y != null) {
+        const [bal] = await tx
+          .select()
+          .from(leaveBalances)
+          .where(
+            and(
+              eq(leaveBalances.tenantId, tenant.id),
+              eq(leaveBalances.staffId, me.id),
+              eq(leaveBalances.leaveTypeId, lr.leaveTypeId),
+              eq(leaveBalances.academicYearId, BigInt(y.y)),
+            ),
+          )
+          .limit(1);
+        if (bal) {
+          await tx
+            .update(leaveBalances)
+            .set({ used: Math.max(0, Number(bal.used) - Number(lr.days)).toFixed(1) })
+            .where(eq(leaveBalances.id, bal.id));
+        }
+      }
+    }
+    const [upd] = await tx
+      .update(leaveRequests)
+      .set({ status: 'cancelled' })
+      .where(eq(leaveRequests.id, lr.id))
+      .returning();
+    return upd;
+  });
+  ok(res, { ...result, tenantId: undefined });
+});
+
+// ---------------------------------------------------------------- GET /inbox  (admin: staff leave)
+leaveRouter.get('/inbox', async (req, res) => {
+  const tenant = currentTenant(req);
+  if (!isAdmin(tenant)) throw new HttpError(403, 'Only the admin can view staff leave approvals');
+  const status = z.enum(['pending', 'approved', 'rejected', 'cancelled']).default('pending').parse(req.query.status ?? 'pending');
+  
+
+  const rows = await db
+    .select({
+      id: leaveRequests.id,
+      staffId: leaveRequests.staffId,
+      staffName: staff.fullName,
+      employeeNo: staff.employeeNo,
+      leaveTypeId: leaveRequests.leaveTypeId,
+      typeName: leaveTypes.name,
+      fromDate: leaveRequests.fromDate,
+      toDate: leaveRequests.toDate,
+      days: leaveRequests.days,
+      durationType: leaveRequests.durationType,
+      reason: leaveRequests.reason,
+      documentFileId: leaveRequests.documentFileId,
+      status: leaveRequests.status,
+      decisionNotes: leaveRequests.decisionNotes,
+      createdAt: leaveRequests.createdAt,
+    })
+    .from(leaveRequests)
+    .innerJoin(staff, eq(staff.id, leaveRequests.staffId))
+    .leftJoin(leaveTypes, eq(leaveTypes.id, leaveRequests.leaveTypeId))
+    .where(and(eq(leaveRequests.tenantId, tenant.id), eq(leaveRequests.status, status)))
+    .orderBy(desc(leaveRequests.id))
+    .limit(100);
+
+  const staffIds = [...new Set(rows.map((r) => r.staffId).filter((x): x is bigint => x != null))];
+  const bals = staffIds.length === 0
+    ? []
+    : await db
+        .select()
+        .from(leaveBalances)
+        .where(
+          and(
+            eq(leaveBalances.tenantId, tenant.id),
+            inArray(leaveBalances.staffId, staffIds),
+          ),
+        );
+
+  ok(
+    res,
+    rows.map((r) => {
+      const b = bals.filter((x) => x.staffId === r.staffId && x.leaveTypeId === r.leaveTypeId).sort((p, q) => Number(q.academicYearId) - Number(p.academicYearId))[0];
+      return { ...r, available: b ? Number(b.allocated) + Number(b.carriedForward) - Number(b.used) : null };
+    }),
+  );
+});
+
+// ---------------------------------------------------------------- POST /:id/decide  (admin, staff leave only)
+const decideSchema = z
+  .object({ decision: z.enum(['approved', 'rejected']), decisionNotes: z.string().trim().max(1000).nullish() })
+  .strict();
+
+leaveRouter.post('/:id/decide', async (req, res) => {
+  const tenant = currentTenant(req);
+  const user = currentUser(req);
+  if (!isAdmin(tenant)) throw new HttpError(403, 'Only the admin can decide staff leave');
+  const id = parseId(req.params.id);
+  const body = decideSchema.parse(req.body);
+
+  const [lr] = await db
+    .select({ id: leaveRequests.id, staffId: leaveRequests.staffId })
+    .from(leaveRequests)
+    .where(and(eq(leaveRequests.id, id), eq(leaveRequests.tenantId, tenant.id)))
+    .limit(1);
+  if (!lr) throw new HttpError(404, 'Leave request not found');
+  if (lr.staffId == null) throw new HttpError(400, 'Student leave is approved by the class teacher');
+
+  const [own] = await db
+    .select({ userId: staff.userId })
+    .from(staff)
+    .where(eq(staff.id, lr.staffId))
+    .limit(1);
+  if (own?.userId != null && own.userId === user.id) throw new HttpError(403, 'You cannot approve your own leave');
+
+  const year = await yearForStaff(tenant, lr.staffId);
+  const out = await decideLeaveRequest(tenant, user, id, {
+    decision: body.decision,
+    decisionNotes: body.decisionNotes ?? null,
+    ...(year != null ? { academicYearId: year } : {}),
+  });
+  ok(res, out);
+});
+
+// ---------------------------------------------------------------- POST /allocate  (admin)
+leaveRouter.post('/allocate', async (req, res) => {
+  const tenant = currentTenant(req);
+  if (!isAdmin(tenant)) throw new HttpError(403, 'Only the admin can allocate leave balances');
+  const body = z.object({ academicYearId: z.coerce.bigint().positive().optional() }).strict().parse(req.body ?? {});
+  const year = await resolveAcademicYearId(tenant, body.academicYearId); // 404 for another school's year, else the current year
+
+  const types = await db
+    .select()
+    .from(leaveTypes)
+    .where(and(eq(leaveTypes.tenantId, tenant.id), eq(leaveTypes.isActive, true), inArray(leaveTypes.applicableTo, STAFF_SIDE)));
+  const quotaTypes = types.filter((t) => t.annualQuota != null);
+  const people = await db
+    .select({ id: staff.id })
+    .from(staff)
+    .where(and(eq(staff.tenantId, tenant.id), isNull(staff.deletedAt), ne(staff.status, 'left')));
+
+  let createdCount = 0;
+  const typeOf = new Map((await db.select({ id: staff.id, st: staff.staffType }).from(staff).where(eq(staff.tenantId, tenant.id))).map((r) => [String(r.id), r.st] as [string, string]));
+  await db.transaction(async (tx) => {
+    for (const p of people) {
+      for (const t of quotaTypes.filter((x) => typeFits(x.applicableTo, typeOf.get(String(p.id))))) {
+        const r = await tx
+          .insert(leaveBalances)
+          .values({
+            tenantId: tenant.id,
+            staffId: p.id,
+            leaveTypeId: t.id,
+            academicYearId: year,
+            allocated: Number(t.annualQuota).toFixed(1),
+            used: '0',
+            carriedForward: '0',
+          })
+          .onConflictDoNothing()
+          .returning({ id: leaveBalances.id });
+        createdCount += r.length;
+      }
+    }
+  });
+  ok(res, { academicYearId: year, staff: people.length, leaveTypes: quotaTypes.length, created: createdCount });
+});
+// ================================================================ STUDENT LEAVE
+async function studentIdsOf(tenant: TenantContext, user: AuthUser): Promise<bigint[]> {
+  const scope = await resolveStudentScope(tenant, user.id, 'leaves.create', 'leaves.manage');
+  if (!scope.scoped || scope.studentIds.length === 0) {
+    throw new HttpError(403, 'Only students and parents can use student leave');
+  }
+  return scope.studentIds;
+}
+
+async function classOfStudents(tenantId: bigint, ids: bigint[]) {
+  const m = new Map<string, { classId: bigint; className: string }>();
+  if (ids.length === 0) return m;
+  const rows = await db
+    .select({ studentId: admissions.studentId, classId: admissions.classId, className: classes.name })
+    .from(admissions)
+    .innerJoin(classes, eq(classes.id, admissions.classId))
+    .where(and(eq(admissions.tenantId, tenantId), inArray(admissions.studentId, ids), isNull(admissions.deletedAt)))
+    .orderBy(asc(admissions.id));
+  for (const r of rows) if (r.studentId != null) m.set(String(r.studentId), { classId: r.classId, className: r.className });
+  return m;
+}
+
+async function maybeStaffId(tenant: TenantContext, user: AuthUser): Promise<bigint | null> {
+  const [row] = await db
+    .select({ id: staff.id })
+    .from(staff)
+    .where(and(eq(staff.tenantId, tenant.id), eq(staff.userId, user.id), isNull(staff.deletedAt)))
+    .limit(1);
+  return row?.id ?? null;
+}
+
+async function myClassIds(tenant: TenantContext, user: AuthUser): Promise<bigint[]> {
+  const sid = await maybeStaffId(tenant, user);
+  if (sid == null) return [];
+  const rows = await db
+    .select({ classId: classTeachers.classId })
+    .from(classTeachers)
+    .where(and(eq(classTeachers.tenantId, tenant.id), eq(classTeachers.teacherId, sid)));
+  return rows.map((r) => r.classId);
+}
+
+// ---- GET /student/me  (student / parent)
+leaveRouter.get('/student/me', async (req, res) => {
+  const tenant = currentTenant(req);
+  const ids = await studentIdsOf(tenant, currentUser(req));
+  const kids = await db
+    .select({ id: students.id, name: students.fullName, admissionNo: students.admissionNo })
+    .from(students)
+    .where(and(eq(students.tenantId, tenant.id), inArray(students.id, ids)));
+  const cm = await classOfStudents(tenant.id, ids);
+  const types = await db
+    .select({
+      id: leaveTypes.id,
+      name: leaveTypes.name,
+      isPaid: leaveTypes.isPaid,
+      maxConsecutiveDays: leaveTypes.maxConsecutiveDays,
+    })
+    .from(leaveTypes)
+    .where(and(eq(leaveTypes.tenantId, tenant.id), eq(leaveTypes.isActive, true), inArray(leaveTypes.applicableTo, ['student', 'both'])))
+    .orderBy(asc(leaveTypes.name));
+  const requests = await db
+    .select({
+      id: leaveRequests.id,
+      studentId: leaveRequests.studentId,
+      studentName: students.fullName,
+      typeName: leaveTypes.name,
+      fromDate: leaveRequests.fromDate,
+      toDate: leaveRequests.toDate,
+      days: leaveRequests.days,
+      durationType: leaveRequests.durationType,
+      reason: leaveRequests.reason,
+      status: leaveRequests.status,
+      decisionNotes: leaveRequests.decisionNotes,
+    })
+    .from(leaveRequests)
+    .innerJoin(students, eq(students.id, leaveRequests.studentId))
+    .leftJoin(leaveTypes, eq(leaveTypes.id, leaveRequests.leaveTypeId))
+    .where(and(eq(leaveRequests.tenantId, tenant.id), inArray(leaveRequests.studentId, ids)))
+    .orderBy(desc(leaveRequests.id))
+    .limit(50);
+  ok(res, {
+    children: kids.map((k) => ({ ...k, className: cm.get(String(k.id))?.className ?? null })),
+    leaveTypes: types,
+    requests,
+  });
+});
+
+// ---- POST /student/apply
+const studentApplySchema = z
+  .object({
+    studentId: z.coerce.bigint().positive().optional(),
+    leaveTypeId: z.coerce.bigint().positive(),
+    fromDate: isoDate,
+    toDate: isoDate,
+    durationType: z.enum(['full_day', 'half_day']).default('full_day'),
+    reason: z.string().trim().min(3).max(1000),
+  })
+  .strict();
+
+leaveRouter.post('/student/apply', async (req, res) => {
+  const tenant = currentTenant(req);
+  const user = currentUser(req);
+  const ids = await studentIdsOf(tenant, user);
+  const body = studentApplySchema.parse(req.body);
+  const studentId = body.studentId ?? ids[0];
+  if (!ids.includes(studentId)) throw new HttpError(403, 'You can only apply for your own child');
+
+  const [lt] = await db
+    .select()
+    .from(leaveTypes)
+    .where(and(eq(leaveTypes.id, body.leaveTypeId), eq(leaveTypes.tenantId, tenant.id)))
+    .limit(1);
+  if (!lt || !lt.isActive || !['student', 'both'].includes(lt.applicableTo)) throw new HttpError(400, 'Leave type not available for students');
+
+  const { days } = await countDays(tenant, body.fromDate, body.toDate, body.durationType, 'student');
+  if (lt.maxConsecutiveDays != null && days > lt.maxConsecutiveDays) {
+    throw new HttpError(400, `This leave type allows at most ${lt.maxConsecutiveDays} days at a time`);
+  }
+  const overlap = await db
+    .select({ id: leaveRequests.id })
+    .from(leaveRequests)
+    .where(
+      and(
+        eq(leaveRequests.tenantId, tenant.id),
+        eq(leaveRequests.studentId, studentId),
+        inArray(leaveRequests.status, ['pending', 'approved']),
+        lte(leaveRequests.fromDate, body.toDate),
+        gte(leaveRequests.toDate, body.fromDate),
+      ),
+    )
+    .limit(1);
+  if (overlap.length) throw new HttpError(409, 'A leave request already exists for these dates');
+
+  const [row] = await db
+    .insert(leaveRequests)
+    .values({
+      tenantId: tenant.id,
+      studentId,
+      staffId: null,
+      leaveTypeId: lt.id,
+      requestedByUserId: user.id,
+      fromDate: body.fromDate,
+      toDate: body.toDate,
+      days: days.toFixed(1),
+      durationType: body.durationType,
+      reason: body.reason,
+      documentFileId: null,
+      status: 'pending',
+    })
+    .returning();
+  created(res, { ...row, tenantId: undefined });
+});
+
+// ---- POST /student/:id/cancel
+leaveRouter.post('/student/:id/cancel', async (req, res) => {
+  const tenant = currentTenant(req);
+  const ids = await studentIdsOf(tenant, currentUser(req));
+  const id = parseId(req.params.id);
+  const [lr] = await db
+    .select()
+    .from(leaveRequests)
+    .where(and(eq(leaveRequests.id, id), eq(leaveRequests.tenantId, tenant.id), inArray(leaveRequests.studentId, ids)))
+    .limit(1);
+  if (!lr) throw new HttpError(404, 'Leave request not found');
+  const okState = lr.status === 'pending' || (lr.status === 'approved' && lr.fromDate > todayIst());
+  if (!okState) throw new HttpError(409, `Cannot cancel this leave request (${lr.status})`);
+  const [upd] = await db.update(leaveRequests).set({ status: 'cancelled' }).where(eq(leaveRequests.id, lr.id)).returning();
+  ok(res, { ...upd, tenantId: undefined });
+});
+
+// ---- GET /student/inbox  (class teacher / admin)
+leaveRouter.get('/student/inbox', async (req, res) => {
+  const tenant = currentTenant(req);
+  const user = currentUser(req);
+  const admin = isAdmin(tenant);
+  const status = z.enum(['pending', 'approved', 'rejected', 'cancelled']).default('pending').parse(req.query.status ?? 'pending');
+  const classIds = admin ? [] : await myClassIds(tenant, user);
+  if (!admin && classIds.length === 0) return ok(res, { canDecide: false, rows: [] });
+
+  const reqs = await db
+    .select({
+      id: leaveRequests.id,
+      studentId: leaveRequests.studentId,
+      studentName: students.fullName,
+      admissionNo: students.admissionNo,
+      typeName: leaveTypes.name,
+      fromDate: leaveRequests.fromDate,
+      toDate: leaveRequests.toDate,
+      days: leaveRequests.days,
+      durationType: leaveRequests.durationType,
+      reason: leaveRequests.reason,
+      status: leaveRequests.status,
+      decisionNotes: leaveRequests.decisionNotes,
+    })
+    .from(leaveRequests)
+    .innerJoin(students, eq(students.id, leaveRequests.studentId))
+    .leftJoin(leaveTypes, eq(leaveTypes.id, leaveRequests.leaveTypeId))
+    .where(and(eq(leaveRequests.tenantId, tenant.id), isNotNull(leaveRequests.studentId), eq(leaveRequests.status, status)))
+    .orderBy(desc(leaveRequests.id))
+    .limit(200);
+  const sids = [...new Set(reqs.map((r) => r.studentId).filter((x): x is bigint => x != null))];
+  const cm = await classOfStudents(tenant.id, sids);
+  const rows = reqs
+    .map((r) => ({ ...r, className: cm.get(String(r.studentId))?.className ?? null, classId: cm.get(String(r.studentId))?.classId ?? null }))
+    .filter((r) => admin || (r.classId != null && classIds.includes(r.classId)))
+    .map((r) => ({ ...r, classId: undefined }));
+  ok(res, { canDecide: true, rows });
+});
+
+// ---- POST /student/:id/decide  (class teacher of that class, or admin)
+leaveRouter.post('/student/:id/decide', async (req, res) => {
+  const tenant = currentTenant(req);
+  const user = currentUser(req);
+  const id = parseId(req.params.id);
+  const body = decideSchema.parse(req.body);
+
+  const [lr] = await db
+    .select({ id: leaveRequests.id, studentId: leaveRequests.studentId, status: leaveRequests.status })
+    .from(leaveRequests)
+    .where(and(eq(leaveRequests.id, id), eq(leaveRequests.tenantId, tenant.id)))
+    .limit(1);
+  if (!lr || lr.studentId == null) throw new HttpError(404, 'Student leave request not found');
+  if (lr.status !== 'pending') throw new HttpError(409, `Leave request is already ${lr.status}`);
+
+  if (!isAdmin(tenant)) {
+    const cm = await classOfStudents(tenant.id, [lr.studentId]);
+    const cls = cm.get(String(lr.studentId));
+    const mine = await myClassIds(tenant, user);
+    if (!cls || !mine.includes(cls.classId)) {
+      throw new HttpError(403, 'Only the class teacher of this student can decide this leave');
+    }
+  }
+  const [upd] = await db
+    .update(leaveRequests)
+    .set({ status: body.decision, decidedBy: user.id, decidedAt: new Date(), decisionNotes: body.decisionNotes ?? null })
+    .where(and(eq(leaveRequests.id, id), eq(leaveRequests.status, 'pending')))
+    .returning();
+  if (!upd) throw new HttpError(409, 'Leave request was already decided');
+  ok(res, { ...upd, tenantId: undefined });
+});

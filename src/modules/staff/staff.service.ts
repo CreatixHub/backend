@@ -9,6 +9,7 @@ import {
   sectionTeachers,
   sections,
   staff,
+  staffSubjects,
   subjects,
   users,
 } from '../../db/schema';
@@ -16,9 +17,12 @@ import { encryptField } from '../../lib/crypto';
 import { HttpError } from '../../lib/errors';
 import type { TenantContext } from '../../lib/tenant';
 import type { AuthUser } from '../../middleware/authenticate';
+import { resolveAcademicYearId } from '../academic-years/academicYears.service';
 import type { CreateStaffInput, ListStaffInput, UpdateStaffInput } from './staff.schemas';
 import { saveAssignments } from './staff.assignments';
 import { ensureClassSubjects, ensureDefaultSections } from './staff.assignAdmin';
+import { parseTeachingProfile, type TeachingProfile } from './staff.profile';
+import { withoutPrimary } from './staff.profileRules';
 
 // RULES (same as members): every query has tenantId = tenant.id, and soft-deleted rows (deletedAt set) are invisible.
 
@@ -44,7 +48,41 @@ const toStaff = (s: StaffRow) => ({
   hasBankAccount: s.bankAccountEnc !== null,
 });
 
-const joinName = (first: string | null | undefined, last: string | null | undefined) =>
+// ---- teaching profile: primary subject + max periods are columns on staff, the other subjects are staff_subjects rows ----
+const TEACHING_ONLY = 'Only teaching staff can have a teaching profile (subjects and maximum periods per week).';
+
+type Reader = Pick<typeof db, 'select'>;
+
+// The additional subjects of the given staff members (by staff id), in a stable order.
+async function loadAdditionalSubjects(
+  tenantId: bigint,
+  staffIds: bigint[],
+  reader: Reader = db,
+): Promise<Map<string, bigint[]>> {
+  const byStaff = new Map<string, bigint[]>();
+  if (staffIds.length === 0) return byStaff;
+  const rows = await reader
+    .select({ staffId: staffSubjects.staffId, subjectId: staffSubjects.subjectId })
+    .from(staffSubjects)
+    .where(and(eq(staffSubjects.tenantId, tenantId), inArray(staffSubjects.staffId, staffIds)))
+    .orderBy(asc(staffSubjects.subjectId));
+  for (const r of rows) byStaff.set(String(r.staffId), [...(byStaff.get(String(r.staffId)) ?? []), r.subjectId]);
+  return byStaff;
+}
+
+const withProfile = (row: StaffRow, additional: Map<string, bigint[]>) => ({
+  ...toStaff(row),
+  additionalSubjectIds: additional.get(String(row.id)) ?? [],
+});
+
+const hasProfile = (p: TeachingProfile) =>
+  p.primarySubjectId !== null || p.additionalSubjectIds.length > 0 || p.maxPeriodsPerWeek !== null;
+
+// Only the keys the client really sent (a PATCH must not wipe fields it did not mention).
+const onlySent = <T extends Record<string, unknown>>(obj: T): Partial<T> =>
+  Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined)) as Partial<T>;
+
+const joinName =(first: string | null | undefined, last: string | null | undefined) =>
   [first, last].filter(Boolean).join(' ');
 
 // DD-MM-YYYY (10 characters, so it passes the 10-character password rule)
@@ -102,7 +140,10 @@ async function assertRelations(tenantId: bigint, userId?: bigint | null, reports
 }
 
 // API input -> database columns: the three sensitive values are encrypted, experience becomes numeric text.
-function toColumns(input: UpdateStaffInput): Partial<StaffInsert> {
+// (the teaching profile fields are saved separately, so they are not part of this input)
+function toColumns(
+  input: Omit<UpdateStaffInput, 'primarySubjectId' | 'additionalSubjectIds' | 'maxPeriodsPerWeek'>,
+): Partial<StaffInsert> {
   const { nationalId, pan, bankAccountNumber, experienceYears, ...plain } = input;
   const columns: Partial<StaffInsert> = { ...plain };
   if (nationalId !== undefined) columns.nationalIdEnc = nationalId === null ? null : encryptField(nationalId);
@@ -166,6 +207,7 @@ export async function listStaff(
           .innerJoin(subjects, eq(subjects.id, sectionTeachers.subjectId))
           .where(and(eq(sectionTeachers.tenantId, tenant.id), inArray(sectionTeachers.teacherId, ids)));
 
+  const additional = await loadAdditionalSubjects(tenant.id, ids);
   const teaching = new Map<string, { classes: Set<string>; sections: Set<string>; subjects: Set<string> }>();
   for (const m of mapped) {
     const key = String(m.teacherId);
@@ -184,7 +226,7 @@ export async function listStaff(
     rows: rows.map((r) => {
       const t = teaching.get(String(r.id));
       return {
-        ...toStaff(r),
+        ...withProfile(r, additional),
         teaching: {
           classes: t ? [...t.classes] : [],
           sections: t ? [...t.sections] : [],
@@ -197,7 +239,8 @@ export async function listStaff(
 }
 
 export async function getStaff(tenant: TenantContext, id: bigint): Promise<unknown> {
-  return toStaff(await loadStaff(tenant.id, id));
+  const row = await loadStaff(tenant.id, id);
+  return withProfile(row, await loadAdditionalSubjects(tenant.id, [row.id]));
 }
 
 // The signed-in staff member's own record. No permission check: the lookup is tied to the caller's own login.
@@ -208,17 +251,33 @@ export async function getMyStaff(tenant: TenantContext, actor: AuthUser): Promis
     .where(and(eq(staff.tenantId, tenant.id), eq(staff.userId, actor.id), isNull(staff.deletedAt)))
     .limit(1);
   if (!row) throw new HttpError(404, 'No staff record is linked to this login');
-  return toStaff(row);
+  return withProfile(row, await loadAdditionalSubjects(tenant.id, [row.id]));
 }
 
 export async function createStaff(tenant: TenantContext, _actor: AuthUser, input: CreateStaffInput): Promise<unknown> {
   // assignments + academicYearId are saved to section_teachers, not to the staff table
-  const { createLogin, assignments, academicYearId, ...staffInput } = input;
-  if (assignments && assignments.length > 0 && !academicYearId) {
+  const {
+    createLogin,
+    roleCode: chosenRole,
+    assignments,
+    academicYearId: requestedYearId,
+    primarySubjectId,
+    additionalSubjectIds,
+    maxPeriodsPerWeek,
+    ...staffInput
+  } = input;
+  if (assignments?.length && requestedYearId === undefined) {
     throw new HttpError(400, 'academicYearId is required when assigning classes and subjects');
   }
+  const academicYearId =
+    requestedYearId === undefined ? undefined : await resolveAcademicYearId(tenant, requestedYearId);
   await assertRelations(tenant.id, staffInput.userId, staffInput.reportsToId);
   const columns = toColumns(staffInput);
+  const profile = await parseTeachingProfile(
+    onlySent({ primarySubjectId, additionalSubjectIds, maxPeriodsPerWeek }),
+    tenant.id,
+  );
+  if (staffInput.staffType !== 'teaching' && hasProfile(profile)) throw new HttpError(400, TEACHING_ONLY);
 
   // A login is made for teaching staff by default (unless an existing login is being linked or it is switched off).
   const wantsLogin = !staffInput.userId && (createLogin ?? staffInput.staffType === 'teaching');
@@ -236,13 +295,23 @@ export async function createStaff(tenant: TenantContext, _actor: AuthUser, input
         let login: { username: string; password: string } | null = null;
 
         if (wantsLogin) {
-          const roleCode = staffInput.staffType === 'teaching' ? 'teacher' : 'staff';
+          const NON_TEACHING_ROLES = ['staff', 'accountant', 'librarian', 'receptionist', 'warden', 'transport_manager', 'nurse', 'security'];
+          if (chosenRole && !NON_TEACHING_ROLES.includes(chosenRole)) throw new HttpError(400, 'That login role is not allowed for staff');
+          const roleCode = staffInput.staffType === 'teaching' ? 'teacher' : (chosenRole ?? 'staff');
           const [role] = await tx
             .select({ id: roles.id })
             .from(roles)
             .where(and(eq(roles.tenantId, tenant.id), eq(roles.code, roleCode)))
             .limit(1);
-          if (!role) throw new HttpError(400, `The "${roleCode}" role is missing in this school`);
+          let roleId: bigint;
+          if (role) roleId = role.id;
+          else if (roleCode === 'staff') {
+            const [made] = await tx
+              .insert(roles)
+              .values({ tenantId: tenant.id, code: 'staff', name: 'Staff', description: 'Non-teaching staff', isSystem: false })
+              .returning({ id: roles.id });
+            roleId = made.id;
+          } else throw new HttpError(400, `The "${roleCode}" role is missing in this school`);
 
           // username = phone; falls back to the employee number if empty or already taken
           const wantedPhone = staffInput.phone?.trim() || null;
@@ -280,7 +349,7 @@ export async function createStaff(tenant: TenantContext, _actor: AuthUser, input
 
           await tx.insert(membershipRoles).values({
             membershipId: membership.id,
-            roleId: role.id,
+            roleId,
             tenantId: tenant.id,
           });
 
@@ -299,11 +368,20 @@ export async function createStaff(tenant: TenantContext, _actor: AuthUser, input
             staffType: staffInput.staffType,
             employmentType: staffInput.employmentType,
             joinedOn: staffInput.joinedOn,
+            primarySubjectId: profile.primarySubjectId,
+            maxPeriodsPerWeek: profile.maxPeriodsPerWeek,
           })
           .returning();
 
+        // the other subjects this teacher can teach (same transaction as the staff row)
+        if (profile.additionalSubjectIds.length > 0) {
+          await tx
+            .insert(staffSubjects)
+            .values(profile.additionalSubjectIds.map((subjectId) => ({ staffId: row.id, subjectId, tenantId: tenant.id })));
+        }
+
         // the classes and subjects this teacher takes (all-or-nothing with the teacher and login)
-        if (assignments && assignments.length > 0) {
+        if (assignments?.length && academicYearId !== undefined) {
           // a class with no section gets a default section "A" first
           await ensureDefaultSections(
             tx,
@@ -312,10 +390,10 @@ export async function createStaff(tenant: TenantContext, _actor: AuthUser, input
           );
           // the timetable only accepts subjects registered for the class
           await ensureClassSubjects(tx, tenant.id, assignments);
-          await saveAssignments(tx, tenant.id, row.id, academicYearId!, assignments);
+          await saveAssignments(tx, tenant.id, row.id, academicYearId, assignments);
         }
 
-        return { ...toStaff(row), ...(login ? { login } : {}) };
+        return { ...toStaff(row), additionalSubjectIds: profile.additionalSubjectIds, ...(login ? { login } : {}) };
       });
     } catch (e) {
       if (!isUniqueViolation(e)) throw e;
@@ -332,31 +410,70 @@ export async function updateStaff(
   id: bigint,
   input: UpdateStaffInput,
 ): Promise<unknown> {
+  // the teaching profile is saved separately (staff_subjects rows), so it is taken out of the plain staff columns
+  const { primarySubjectId, additionalSubjectIds, maxPeriodsPerWeek, ...rest } = input;
   const existing = await loadStaff(tenant.id, id);
-  await assertRelations(tenant.id, input.userId, input.reportsToId, id);
+  await assertRelations(tenant.id, rest.userId, rest.reportsToId, id);
 
   // leaving the school needs a leaving date (either sent now or already on file)
-  const nextStatus = input.status ?? existing.status;
-  const nextLeftOn = input.leftOn !== undefined ? input.leftOn : existing.leftOn;
+  const nextStatus = rest.status ?? existing.status;
+  const nextLeftOn = rest.leftOn !== undefined ? rest.leftOn : existing.leftOn;
   if (nextStatus === 'left' && !nextLeftOn) {
     throw new HttpError(400, 'Validation failed', [{ field: 'leftOn', message: 'Required when status is left' }]);
   }
 
-  const set = toColumns(input);
-  if (input.firstName !== undefined || input.lastName !== undefined) {
+  const set = toColumns(rest);
+  if (rest.firstName !== undefined || rest.lastName !== undefined) {
     set.fullName = joinName(
-      input.firstName ?? existing.firstName,
-      input.lastName !== undefined ? input.lastName : existing.lastName,
+      rest.firstName ?? existing.firstName,
+      rest.lastName !== undefined ? rest.lastName : existing.lastName,
     );
   }
 
+  // Teaching profile: only the fields that were sent change, and the primary subject never stays in the additional list.
+  const sent = onlySent({ primarySubjectId, additionalSubjectIds, maxPeriodsPerWeek });
+  const profile = await parseTeachingProfile(sent, tenant.id);
+  const nextType = rest.staffType ?? existing.staffType;
+  if (nextType !== 'teaching' && hasProfile(profile)) throw new HttpError(400, TEACHING_ONLY);
+
+  let nextAdditional: bigint[] | undefined; // undefined = leave the staff_subjects rows alone
+  if (nextType !== 'teaching') {
+    // switched away from teaching: the profile goes with it
+    set.primarySubjectId = null;
+    set.maxPeriodsPerWeek = null;
+    nextAdditional = [];
+  } else {
+    if ('primarySubjectId' in sent) set.primarySubjectId = profile.primarySubjectId;
+    if ('maxPeriodsPerWeek' in sent) set.maxPeriodsPerWeek = profile.maxPeriodsPerWeek;
+    if ('primarySubjectId' in sent || 'additionalSubjectIds' in sent) {
+      const primary = 'primarySubjectId' in sent ? profile.primarySubjectId : existing.primarySubjectId;
+      const current =
+        'additionalSubjectIds' in sent
+          ? profile.additionalSubjectIds
+          : ((await loadAdditionalSubjects(tenant.id, [id])).get(String(id)) ?? []);
+      nextAdditional = withoutPrimary(current, primary);
+    }
+  }
+  if (Object.keys(set).length === 0) set.updatedAt = new Date(); // only the subject list changed: still touch the row
+
   try {
-    const [row] = await db
-      .update(staff)
-      .set(set)
-      .where(and(eq(staff.id, id), eq(staff.tenantId, tenant.id), isNull(staff.deletedAt)))
-      .returning();
-    return toStaff(row);
+    return await db.transaction(async (tx) => {
+      const [row] = await tx
+        .update(staff)
+        .set(set)
+        .where(and(eq(staff.id, id), eq(staff.tenantId, tenant.id), isNull(staff.deletedAt)))
+        .returning();
+
+      if (nextAdditional !== undefined) {
+        await tx.delete(staffSubjects).where(and(eq(staffSubjects.staffId, id), eq(staffSubjects.tenantId, tenant.id)));
+        if (nextAdditional.length > 0) {
+          await tx
+            .insert(staffSubjects)
+            .values(nextAdditional.map((subjectId) => ({ staffId: id, subjectId, tenantId: tenant.id })));
+        }
+      }
+      return withProfile(row, await loadAdditionalSubjects(tenant.id, [id], tx));
+    });
   } catch (e) {
     if (isUniqueViolation(e)) throw new HttpError(409, 'That employee number is already used in this school');
     throw e;

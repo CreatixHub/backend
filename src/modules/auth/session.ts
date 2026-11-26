@@ -66,7 +66,7 @@ export function clearRefreshCookie(res: Response) {
 
 const ROLE_PRIORITY = [
   "teacher", "accountant", "librarian", "receptionist", "warden",
-  "transport_manager", "nurse", "security", "parent", "student",
+  "transport_manager", "nurse", "security", "staff", "parent", "student",
 ];
 
 // Your frontend has ONE role per user (it picks the home dashboard from it). We compute it from the

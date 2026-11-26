@@ -20,11 +20,15 @@ import {
   time,
   check,
 } from "drizzle-orm/pg-core";
+import type { Bell, BlockedSlot, LessonPart, Problem, RuleSet, ScheduleEntry } from "../modules/timetable-planner/engine/engine";
 // Every bigint/bigserial id column uses { mode: "bigint" } so the app keeps working with real JS BigInt
 // values everywhere (lib/bigint.ts already teaches JSON.stringify to serialize them) - same shape the
 // Prisma schema used.
 const idCol = () => bigserial("id", { mode: "bigint" }).primaryKey();
 const plainBigint = (name: string) => bigint(name, { mode: "bigint" });
+// academic_year_id on every table that is scoped to a school year; points at academic_years.id (see academicYears below).
+const academicYearFk = () =>
+  plainBigint("academic_year_id").references((): AnyPgColumn => academicYears.id, { onDelete: "restrict", onUpdate: "cascade" });
 const ts = (name: string) => timestamp(name, { withTimezone: true, precision: 6, mode: "date" });
 const createdAt = () => ts("created_at").notNull().default(sql`CURRENT_TIMESTAMP`);
 // Matches Prisma's @updatedAt: set once on insert, bumped automatically on every .update() issued through Drizzle.
@@ -47,6 +51,61 @@ export const organizations = pgTable(
     deletedAt: ts("deleted_at"),
   },
   (t) => [uniqueIndex("organizations_slug_key").on(t.slug)],
+);
+
+// A school year ("2026-27"). Every school has its own set of years; exactly one is "current" (the partial unique
+// index below allows at most one row per school with is_current = true). Tables that are scoped to a year
+// (timetable_entries, admissions, invoices, ...) point at academic_years.id through academic_year_id.
+export const academicYears = pgTable(
+  "academic_years",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    name: text("name").notNull(), // "2026-27"
+    startsOn: date("starts_on").notNull(),
+    endsOn: date("ends_on").notNull(),
+    isCurrent: boolean("is_current").notNull().default(false),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("academic_years_tenant_id_name_key").on(t.tenantId, t.name),
+    uniqueIndex("academic_years_tenant_id_current_key")
+      .on(t.tenantId)
+      .where(sql`${t.isCurrent}`),
+    check("academic_years_dates_check", sql`${t.endsOn} > ${t.startsOn}`),
+  ],
+);
+
+export const plannerSettings = pgTable(
+  "planner_settings",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    academicYearId: academicYearFk().notNull(),
+    bell: jsonb("bell")
+      .$type<Bell>()
+      .notNull()
+      .default({
+        weekType: "weekly",
+        dayTypes: [{ id: "usual", name: "Usual day", days: [1, 2, 3, 4, 5], periods: [] }],
+      }),
+    rules: jsonb("rules")
+      .$type<{ defaults: RuleSet; teachers: Record<string, RuleSet>; sections: Record<string, RuleSet> }>()
+      .notNull()
+      .default({ defaults: {}, teachers: {}, sections: {} }),
+    availability: jsonb("availability")
+      .$type<Record<"staff" | "section" | "room", Record<string, BlockedSlot[]>>>()
+      .notNull()
+      .default({ staff: {}, section: {}, room: {} }),
+    excludedSectionIds: plainBigint("excluded_section_ids").array().notNull().default(sql`'{}'::bigint[]`),
+    revision: integer("revision").notNull().default(0),
+  },
+  (t) => [uniqueIndex("planner_settings_tenant_year_key").on(t.tenantId, t.academicYearId)],
 );
 
 export const users = pgTable(
@@ -317,6 +376,14 @@ export const staff = pgTable(
     photoFileId: plainBigint("photo_file_id"), // files table not built yet
     socialLinks: jsonb("social_links").$type<Record<string, string>>().notNull().default({}),
 
+    // Teaching profile (teaching staff only): the main subject and the most periods a week this teacher can take.
+    // The other subjects they can teach live in staff_subjects.
+    primarySubjectId: plainBigint("primary_subject_id").references((): AnyPgColumn => subjects.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    maxPeriodsPerWeek: smallint("max_periods_per_week"), // null = no limit set
+
     createdAt: createdAt(),
     updatedAt: updatedAt(),
     deletedAt: ts("deleted_at"),
@@ -327,6 +394,27 @@ export const staff = pgTable(
     index("staff_tenant_id_status_idx").on(t.tenantId, t.status),
     index("staff_user_id_idx").on(t.userId),
     index("staff_reports_to_id_idx").on(t.reportsToId),
+    check("staff_max_periods_per_week_range", sql`${t.maxPeriodsPerWeek} BETWEEN 1 AND 35`),
+  ],
+);
+
+// The extra subjects a teacher can teach, besides their primary subject (staff.primary_subject_id).
+export const staffSubjects = pgTable(
+  "staff_subjects",
+  {
+    staffId: plainBigint("staff_id")
+      .notNull()
+      .references(() => staff.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    subjectId: plainBigint("subject_id")
+      .notNull()
+      .references(() => subjects.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.staffId, t.subjectId] }),
+    index("staff_subjects_tenant_id_subject_id_idx").on(t.tenantId, t.subjectId),
   ],
 );
 // ---------------------------------------------------------------- relations (for the `db.query.*` API)
@@ -359,6 +447,18 @@ export const subjects = pgTable(
 );
 
 // Classes, sections and classrooms (spec section 5). branch_id is optional because the branches table is not built yet.
+export const roomGroups = pgTable(
+  "room_groups",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    name: text("name").notNull(),
+  },
+  (t) => [uniqueIndex("room_groups_tenant_name_key").on(t.tenantId, sql`lower(${t.name})`)],
+);
+
 export const classes = pgTable(
   "classes",
   {
@@ -398,6 +498,10 @@ export const classrooms = pgTable(
     building: text("building"),
     floor: smallint("floor"),
     capacity: smallint("capacity"),
+    groupId: plainBigint("group_id").references(() => roomGroups.id, {
+      onDelete: "restrict",
+      onUpdate: "cascade",
+    }),
     roomType: text("room_type").notNull().default("classroom"), // classroom | lab | hall | staff_room | other
     status: text("status").notNull().default("active"),
     facilities: text("facilities").array().notNull().default(sql`'{}'::text[]`), // e.g. projector, ac, smartboard
@@ -408,6 +512,7 @@ export const classrooms = pgTable(
   },
   (t) => [
     uniqueIndex("classrooms_tenant_id_code_key").on(t.tenantId, t.code).where(sql`${t.deletedAt} IS NULL`),
+    index("classrooms_tenant_group_idx").on(t.tenantId, t.groupId),
   ],
 );
 
@@ -441,6 +546,29 @@ export const sections = pgTable(
   ],
 );
 
+export const plannerLessons = pgTable(
+  "planner_lessons",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    academicYearId: academicYearFk().notNull(),
+    subjectId: plainBigint("subject_id").references(() => subjects.id, {
+      onDelete: "restrict",
+      onUpdate: "cascade",
+    }),
+    activityName: text("activity_name"),
+    sectionIds: plainBigint("section_ids").array().notNull(),
+    syncGroup: text("sync_group"),
+    parts: jsonb("parts").$type<LessonPart[]>().notNull(),
+  },
+  (t) => [
+    index("planner_lessons_tenant_year_idx").on(t.tenantId, t.academicYearId, t.id),
+    check("planner_lessons_subject_or_activity", sql`${t.subjectId} IS NOT NULL OR ${t.activityName} IS NOT NULL`),
+  ],
+);
+
 // Which subjects a class teaches, and the marks setup for each (spec section 4).
 export const classSubjects = pgTable(
   "class_subjects",
@@ -469,7 +597,7 @@ export const classSubjects = pgTable(
   ],
 );
 
-// Timetable (spec section 7). academic_years is not built yet, so academic_year_id has no FK for now.
+// Timetable (spec section 7).
 export const timeSlots = pgTable(
   "time_slots",
   {
@@ -479,6 +607,9 @@ export const timeSlots = pgTable(
       .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
     branchId: plainBigint("branch_id"), // branches table not built yet
     name: text("name").notNull(), // "Period 1", "Lunch"
+    // The bell this slot belongs to ("usual", "friday", ...) and the weekdays (1 = Mon ... 7 = Sun) it runs on.
+    dayType: text("day_type").notNull().default("usual"),
+    days: smallint("days").array().notNull().default(sql`'{1,2,3,4,5,6}'::smallint[]`),
     sequence: smallint("sequence").notNull(), // 1, 2, 3 ... order within the day
     startsAt: time("starts_at").notNull(),
     endsAt: time("ends_at").notNull(),
@@ -488,7 +619,7 @@ export const timeSlots = pgTable(
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (t) => [uniqueIndex("time_slots_tenant_id_sequence_key").on(t.tenantId, t.sequence)],
+  (t) => [uniqueIndex("time_slots_tenant_id_day_type_sequence_key").on(t.tenantId, t.dayType, t.sequence)],
 );
 
 // Which teacher takes which subject for a section, for one academic year.
@@ -505,7 +636,7 @@ export const sectionTeachers = pgTable(
     subjectId: plainBigint("subject_id")
       .notNull()
       .references(() => subjects.id, { onDelete: "restrict", onUpdate: "cascade" }),
-    academicYearId: plainBigint("academic_year_id").notNull(), // academic_years table not built yet
+    academicYearId: academicYearFk().notNull(),
     teacherId: plainBigint("teacher_id")
       .notNull()
       .references(() => staff.id, { onDelete: "restrict", onUpdate: "cascade" }),
@@ -515,6 +646,81 @@ export const sectionTeachers = pgTable(
   (t) => [
     uniqueIndex("section_teachers_section_subject_year_key").on(t.sectionId, t.subjectId, t.academicYearId),
     index("section_teachers_tenant_id_teacher_id_idx").on(t.tenantId, t.teacherId),
+  ],
+);
+
+// Which teacher is in charge of a class (its class teacher). One per class.
+// Different from section_teachers, which is who teaches each subject.
+export const classTeachers = pgTable(
+  "class_teachers",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    classId: plainBigint("class_id")
+      .notNull()
+      .references(() => classes.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    teacherId: plainBigint("teacher_id")
+      .notNull()
+      .references(() => staff.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("class_teachers_tenant_id_class_id_key").on(t.tenantId, t.classId),
+    index("class_teachers_tenant_id_teacher_id_idx").on(t.tenantId, t.teacherId),
+  ],
+);
+
+export interface PreviousPlannerSlot {
+  id: string;
+  dayType: string;
+  days: number[];
+  sequence: number;
+  name: string;
+  startsAt: string;
+  endsAt: string;
+  isBreak: boolean;
+  durationMinutes: number | null;
+  isActive: boolean;
+  created?: boolean;
+}
+
+export const timetableVersions = pgTable(
+  "timetable_versions",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    academicYearId: academicYearFk().notNull(),
+    name: text("name").notNull(),
+    status: text("status").$type<"draft" | "published" | "archived">().notNull().default("draft"),
+    seed: integer("seed").notNull(),
+    bell: jsonb("bell").$type<Bell>().notNull(),
+    problem: jsonb("problem").$type<Problem>().notNull(),
+    entries: jsonb("entries").$type<ScheduleEntry[]>().notNull().default([]),
+    fingerprint: text("fingerprint").notNull(),
+    settingsRevision: integer("settings_revision").notNull(),
+    editRevision: integer("edit_revision").notNull().default(0),
+    previousVersionId: plainBigint("previous_version_id")
+      .references((): AnyPgColumn => timetableVersions.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    previousSlots: jsonb("previous_slots").$type<PreviousPlannerSlot[]>(),
+    createdBy: plainBigint("created_by").notNull()
+      .references(() => users.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    publishedBy: plainBigint("published_by")
+      .references(() => users.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    generatedAt: ts("generated_at"),
+    publishedAt: ts("published_at"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index("timetable_versions_tenant_year_id_idx").on(t.tenantId, t.academicYearId, t.id),
+    uniqueIndex("timetable_versions_published_year_key").on(t.tenantId, t.academicYearId)
+      .where(sql`${t.status} = 'published'`),
+    check("timetable_versions_status_check", sql`${t.status} in ('draft', 'published', 'archived')`),
   ],
 );
 
@@ -529,12 +735,18 @@ export const timetableEntries = pgTable(
     sectionId: plainBigint("section_id")
       .notNull()
       .references(() => sections.id, { onDelete: "restrict", onUpdate: "cascade" }),
-    subjectId: plainBigint("subject_id")
-      .notNull()
-      .references(() => subjects.id, { onDelete: "restrict", onUpdate: "cascade" }),
-    teacherId: plainBigint("teacher_id")
-      .notNull()
-      .references(() => staff.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    // subject and teacher are optional only for rows the planner writes (a free period, an activity with a title);
+    // the manual /api/timetable routes still require both
+    subjectId: plainBigint("subject_id").references(() => subjects.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    teacherId: plainBigint("teacher_id").references(() => staff.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    title: text("title"), // shown when there is no subject (planner rows)
+    source: text("source").notNull().default("manual"), // manual | planner
+    // The planner version that wrote this row, and the version that later replaced it.
+    versionId: plainBigint("version_id")
+      .references(() => timetableVersions.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    archivedByVersionId: plainBigint("archived_by_version_id")
+      .references(() => timetableVersions.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    classroomIds: plainBigint("classroom_ids").array().notNull().default(sql`'{}'::bigint[]`), // planner rows may use several rooms
     timeSlotId: plainBigint("time_slot_id")
       .notNull()
       .references(() => timeSlots.id, { onDelete: "restrict", onUpdate: "cascade" }),
@@ -543,7 +755,7 @@ export const timetableEntries = pgTable(
       onUpdate: "cascade",
     }),
     dayOfWeek: smallint("day_of_week").notNull(), // 1 (Mon) - 7 (Sun)
-    academicYearId: plainBigint("academic_year_id").notNull(), // academic_years table not built yet
+    academicYearId: academicYearFk().notNull(),
     effectiveFrom: date("effective_from").notNull(),
     effectiveTo: date("effective_to"),
     status: text("status").notNull().default("active"), // active | inactive
@@ -555,11 +767,13 @@ export const timetableEntries = pgTable(
     index("timetable_entries_teacher_day_idx").on(t.tenantId, t.teacherId, t.dayOfWeek),
     index("timetable_entries_classroom_idx").on(t.classroomId),
     index("timetable_entries_time_slot_idx").on(t.timeSlotId),
+    index("timetable_entries_version_id_idx").on(t.versionId),
+    index("timetable_entries_archived_by_version_id_idx").on(t.archivedByVersionId),
   ],
 );
 
 // LMS (Basic): homework + submissions (spec section 8).
-// enrollments, files and academic_years are not built yet, so enrollment_id / file_id / academic_year_id have no FK for now.
+// enrollments and files are not built yet, so enrollment_id / file_id have no FK for now.
 export const homework = pgTable(
   "homework",
   {
@@ -577,7 +791,7 @@ export const homework = pgTable(
     teacherId: plainBigint("teacher_id")
       .notNull()
       .references(() => staff.id, { onDelete: "restrict", onUpdate: "cascade" }),
-    academicYearId: plainBigint("academic_year_id").notNull(), // academic_years table not built yet
+    academicYearId: academicYearFk().notNull(),
     title: text("title").notNull(),
     description: text("description"),
     homeworkType: text("homework_type").notNull().default("assignment"), // assignment | project | reading | practice
@@ -665,7 +879,7 @@ export const homeworkSubmissionFiles = pgTable(
   (t) => [primaryKey({ columns: [t.submissionId, t.fileId] })],
 );
 
-// Transport (spec section 11). branches, academic_years and students are not built yet, so those ids have no FK for now.
+// Transport (spec section 11). branches and students are not built yet, so those ids have no FK for now.
 export const vehicles = pgTable(
   "vehicles",
   {
@@ -817,7 +1031,7 @@ export const transportAssignments = pgTable(
       onUpdate: "cascade",
     }),
     staffId: plainBigint("staff_id").references(() => staff.id, { onDelete: "restrict", onUpdate: "cascade" }),
-    academicYearId: plainBigint("academic_year_id").notNull(), // academic_years table not built yet
+    academicYearId: academicYearFk().notNull(),
     routeId: plainBigint("route_id")
       .notNull()
       .references(() => transportRoutes.id, { onDelete: "restrict", onUpdate: "cascade" }),
@@ -962,7 +1176,7 @@ export const assetMaintenance = pgTable(
 );
 
 // ================================================================ ADMISSIONS (spec §1) & STUDENTS (spec §2)
-// academic_years, religions, cities, languages and files tables do not exist yet -> plain bigint columns, no FK.
+// religions, cities, languages and files tables do not exist yet -> plain bigint columns, no FK.
 
 export const studentHouses = pgTable(
   "student_houses",
@@ -1038,6 +1252,7 @@ export const students = pgTable(
       onUpdate: "cascade",
     }),
     admissionNo: text("admission_no").notNull(),
+    rollNo: text("roll_no"), // class roll number, generated A-Z by name
     firstName: text("first_name").notNull(),
     lastName: text("last_name").notNull(),
     fullName: text("full_name"),
@@ -1142,7 +1357,7 @@ export const admissions = pgTable(
       .notNull()
       .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
     applicationNo: text("application_no").notNull(),
-    academicYearId: plainBigint("academic_year_id").notNull(), // academic_years table not built yet
+    academicYearId: academicYearFk().notNull(),
     classId: plainBigint("class_id")
       .notNull()
       .references(() => classes.id, { onDelete: "restrict", onUpdate: "cascade" }),
@@ -1308,7 +1523,7 @@ export const leaveBalances = pgTable(
     leaveTypeId: plainBigint("leave_type_id")
       .notNull()
       .references(() => leaveTypes.id, { onDelete: "cascade", onUpdate: "cascade" }),
-    academicYearId: plainBigint("academic_year_id").notNull(), // academic_years table not built yet
+    academicYearId: academicYearFk().notNull(),
     allocated: numeric("allocated", { precision: 5, scale: 1 }).notNull().default("0"),
     used: numeric("used", { precision: 5, scale: 1 }).notNull().default("0"),
     carriedForward: numeric("carried_forward", { precision: 5, scale: 1 }).notNull().default("0"),
@@ -1357,7 +1572,7 @@ export const academicCalendarEvents = pgTable(
     tenantId: plainBigint("tenant_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
-    academicYearId: plainBigint("academic_year_id"), // academic_years table not built yet
+    academicYearId: academicYearFk(),
     branchId: plainBigint("branch_id"), // branches table not built yet
     title: text("title").notNull(),
     description: text("description"),
@@ -1400,6 +1615,93 @@ export const studentAttendance = pgTable(
   (t) => [
     primaryKey({ columns: [t.enrollmentId, t.attendanceDate] }),
     index("student_attendance_tenant_id_date_idx").on(t.tenantId, t.attendanceDate),
+  ],
+);
+
+// Attendance taken every period (hour). One row = one student, in one timetable period, on one date.
+// class/slot/subject/teacher are copied from the period when it is marked, so later timetable changes do not rewrite history.
+export const periodAttendance = pgTable(
+  "period_attendance",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    attendanceDate: date("attendance_date").notNull(),
+    timetableEntryId: plainBigint("timetable_entry_id")
+      .notNull()
+      .references(() => timetableEntries.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    classId: plainBigint("class_id")
+      .notNull()
+      .references(() => classes.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    timeSlotId: plainBigint("time_slot_id")
+      .notNull()
+      .references(() => timeSlots.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    subjectId: plainBigint("subject_id")
+      .notNull()
+      .references(() => subjects.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    teacherId: plainBigint("teacher_id")
+      .notNull()
+      .references(() => staff.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    studentId: plainBigint("student_id")
+      .notNull()
+      .references(() => students.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    status: text("status").notNull(), // present | absent | late | excused
+    remarks: text("remarks"),
+    markedBy: plainBigint("marked_by").references(() => users.id, { onDelete: "set null", onUpdate: "cascade" }),
+    markedAt: ts("marked_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("period_attendance_period_student_key").on(t.tenantId, t.attendanceDate, t.timetableEntryId, t.studentId),
+    index("period_attendance_tenant_id_date_idx").on(t.tenantId, t.attendanceDate),
+    index("period_attendance_tenant_id_student_id_date_idx").on(t.tenantId, t.studentId, t.attendanceDate),
+    index("period_attendance_tenant_id_class_id_date_idx").on(t.tenantId, t.classId, t.attendanceDate),
+  ],
+);
+
+// In-app notifications (e.g. "marked absent in Period 3"). One row per recipient user.
+export const notifications = pgTable(
+  "notifications",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    userId: plainBigint("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    type: text("type").notNull(), // attendance_absent | ...
+    title: text("title").notNull(),
+    body: text("body").notNull(),
+    data: jsonb("data").$type<Record<string, unknown>>().notNull().default({}),
+    readAt: ts("read_at"),
+    pushSentAt: ts("push_sent_at"),
+    createdAt: createdAt(),
+  },
+  (t) => [index("notifications_user_created_idx").on(t.tenantId, t.userId, t.createdAt)],
+);
+
+// Expo push tokens, one row per phone (a user can have several phones).
+export const devicePushTokens = pgTable(
+  "device_push_tokens",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    userId: plainBigint("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    token: text("token").notNull(),
+    platform: text("platform"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("device_push_tokens_token_key").on(t.token),
+    index("device_push_tokens_user_idx").on(t.tenantId, t.userId),
   ],
 );
 
@@ -1487,7 +1789,7 @@ export const feeStructures = pgTable(
     tenantId: plainBigint("tenant_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
-    academicYearId: plainBigint("academic_year_id").notNull(), // academic_years table not built yet
+    academicYearId: academicYearFk().notNull(),
     classId: plainBigint("class_id")
       .notNull()
       .references(() => classes.id, { onDelete: "restrict", onUpdate: "cascade" }),
@@ -1583,7 +1885,7 @@ export const invoices = pgTable(
       .notNull()
       .references(() => students.id, { onDelete: "restrict", onUpdate: "cascade" }),
     enrollmentId: plainBigint("enrollment_id"), // enrollments table not built yet
-    academicYearId: plainBigint("academic_year_id").notNull(), // academic_years table not built yet
+    academicYearId: academicYearFk().notNull(),
     installmentId: plainBigint("installment_id").references(() => feeInstallments.id, {
       onDelete: "set null",
       onUpdate: "cascade",
@@ -1644,6 +1946,7 @@ export const payments = pgTable(
     receivedBy: plainBigint("received_by").references(() => users.id, { onDelete: "set null", onUpdate: "cascade" }),
     status: text("status").notNull().default("cleared"), // cleared | pending | bounced | reversed
     idempotencyKey: text("idempotency_key"),
+    referenceNo: text("reference_no"), // UPI reference number (UTR) entered by the student
     chequeNo: text("cheque_no"),
     chequeDate: date("cheque_date"),
     chequeStatus: text("cheque_status"),
@@ -1653,6 +1956,7 @@ export const payments = pgTable(
   (t) => [
     uniqueIndex("payments_tenant_id_receipt_no_key").on(t.tenantId, t.receiptNo),
     uniqueIndex("payments_tenant_id_idempotency_key_key").on(t.tenantId, t.idempotencyKey),
+    uniqueIndex("payments_tenant_id_reference_no_key").on(t.tenantId, t.referenceNo),
     index("payments_tenant_id_student_id_idx").on(t.tenantId, t.studentId),
   ],
 );
@@ -2107,3 +2411,36 @@ export const exitPassesRelations = relations(exitPasses, ({ one }) => ({
   requestedByStaff: one(staff, { fields: [exitPasses.requestedByStaffId], references: [staff.id] }),
   approvedByUser: one(users, { fields: [exitPasses.approvedBy], references: [users.id] }),
 }));
+
+export const classTeachersRelations = relations(classTeachers, ({ one }) => ({
+  class: one(classes, { fields: [classTeachers.classId], references: [classes.id] }),
+  teacher: one(staff, { fields: [classTeachers.teacherId], references: [staff.id] }),
+}));
+// ================================================================ CLASS NOTES
+// A teacher uploads a note (a file) for a class; every student of that class can open it.
+export const classNotes = pgTable(
+  "class_notes",
+  {
+    id: idCol(),
+    tenantId: plainBigint("tenant_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    classId: plainBigint("class_id")
+      .notNull()
+      .references(() => classes.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    subjectId: plainBigint("subject_id").references(() => subjects.id, { onDelete: "set null", onUpdate: "cascade" }),
+    title: text("title").notNull(),
+    description: text("description"),
+    fileId: plainBigint("file_id")
+      .notNull()
+      .references((): AnyPgColumn => files.id, { onDelete: "restrict", onUpdate: "cascade" }),
+    uploadedBy: plainBigint("uploaded_by").references((): AnyPgColumn => users.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    deletedAt: ts("deleted_at"),
+  },
+  (t) => [index("class_notes_tenant_id_class_id_idx").on(t.tenantId, t.classId)],
+);

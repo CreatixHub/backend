@@ -8,12 +8,12 @@ type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 export type ClassSubject = { classId: bigint; subjectId: bigint };
 
 // Saves "this teacher takes <subject> in <class>". A class is stored per section, so the teacher is
-// assigned to every section of the class. All inside the caller's transaction (all or nothing).
+// assigned to every section of the class. The caller resolves the academic year for the tenant before the transaction.
 export async function saveAssignments(
   tx: Tx,
   tenantId: bigint,
   teacherId: bigint,
-  academicYearId: number | bigint,
+  academicYearId: bigint,
   items: ClassSubject[],
 ): Promise<void> {
   // same class + subject listed twice -> once
@@ -75,7 +75,7 @@ export async function saveAssignments(
     .where(
       and(
         eq(sectionTeachers.tenantId, tenantId),
-        eq(sectionTeachers.academicYearId, BigInt(academicYearId)),
+        eq(sectionTeachers.academicYearId, academicYearId),
         inArray(sectionTeachers.sectionId, wanted.map((w) => w.sectionId)),
         inArray(sectionTeachers.subjectId, subjectIds),
       ),
@@ -89,7 +89,7 @@ export async function saveAssignments(
       tenantId,
       sectionId: w.sectionId,
       subjectId: w.subjectId,
-      academicYearId: BigInt(academicYearId),
+      academicYearId,
       teacherId,
     })),
   );

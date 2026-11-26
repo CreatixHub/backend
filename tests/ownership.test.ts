@@ -3,7 +3,7 @@ import request from "supertest";
 import { describe, expect, it } from "vitest";
 import { db } from "../src/db";
 import { permissions, rolePermissions } from "../src/db/schema";
-import { VALID_PASSWORD, app, signupAndLogin, uniqueEmail, uniqueSlug } from "./helpers";
+import { VALID_PASSWORD, app, currentAcademicYearId, signupAndLogin, uniqueEmail, uniqueSlug } from "./helpers";
 
 describe("Task 4 — Parent & Student Row-Level Ownership Security", () => {
   it("scopes students, guardians, leave requests, invoices, payments, and fails closed on enrollment-only tables", async () => {
@@ -12,6 +12,7 @@ describe("Task 4 — Parent & Student Row-Level Ownership Security", () => {
     const orgRes = await owner.agent.post("/api/organizations").send({ name: "Ownership School", slug });
     expect(orgRes.status).toBe(201);
     await owner.switchOrganization(slug);
+    const yearId = await currentAcademicYearId(owner.agent);
 
     // Grant `students.view` & `leaves.view` to this test school's `parent` role so we also exercise those GET routes
     const rolesRes = await owner.agent.get("/api/roles");
@@ -125,7 +126,7 @@ describe("Task 4 — Parent & Student Row-Level Ownership Security", () => {
       owner.agent.post("/api/invoices").send({
         number: num,
         studentId,
-        academicYearId: "1",
+        academicYearId: yearId,
         issuedOn: "2026-08-01",
         dueOn: "2026-08-15",
         lines: [{ lineType: "fee", quantity: 1, unitAmount: 1000 }],

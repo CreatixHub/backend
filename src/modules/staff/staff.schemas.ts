@@ -72,6 +72,12 @@ const staffFields = {
   emergencyContactPhone: text(20).nullish(),
   photoFileId: id.nullish(),
   socialLinks: z.record(z.string().trim().min(1).max(30), z.string().trim().url().max(300)).optional(),
+
+  // Teaching profile (teaching staff only). The subjects must belong to this school and the maximum is checked in
+  // staff.profile.ts, which gives the clear error message, so the maximum is only loosely typed here.
+  primarySubjectId: id.nullish(),
+  additionalSubjectIds: z.array(id).max(50).nullish(),
+  maxPeriodsPerWeek: z.union([z.number(), z.string(), z.null()]).optional(), // 1 to 35; null or "" clears it
 };
 
 export const listStaffSchema = z
@@ -96,6 +102,7 @@ export const createStaffSchema = z
   .object({
     ...staffFields,
     createLogin: z.boolean().optional(),
+    roleCode: z.string().trim().min(1).max(40).optional(), // login role for non-teaching staff
     academicYearId: id.optional(),
     assignments: z.array(z.object({ classId: id, subjectId: id }).strict()).max(40).optional(),
   })

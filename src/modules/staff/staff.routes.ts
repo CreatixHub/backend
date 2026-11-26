@@ -3,10 +3,11 @@ import { parseId } from '../../lib/bigint';
 import { created, noContent, ok } from '../../lib/respond';
 import { currentTenant, currentUser } from '../../middleware/authenticate';
 import { requirePermission } from '../../middleware/requirePermission';
+import { resolveAcademicYearId } from '../academic-years/academicYears.service';
 import { createStaffSchema, listStaffSchema, updateStaffSchema } from './staff.schemas';
 import * as staffService from './staff.service';
 import * as me from './staff.me';
-import { addAssignments, addAssignmentsSchema, removeAssignment } from './staff.assignAdmin';
+import { addAssignments, addAssignmentsSchema, assignmentYearQuery, removeAssignment } from './staff.assignAdmin';
 
 export const staffRouter = Router();
 
@@ -26,7 +27,8 @@ staffRouter.get('/me/sections', async (req, res) => {
 });
 
 staffRouter.get('/me/timetable', async (req, res) => {
-  ok(res, await me.getMyTimetable(currentTenant(req), currentUser(req)));
+  const { rows, today } = await me.getMyTimetable(currentTenant(req), currentUser(req));
+  ok(res, rows, { today });
 });
 
 staffRouter.get('/me/assignments', async (req, res) => {
@@ -39,11 +41,15 @@ staffRouter.get('/me/homework', async (req, res) => {
 
 // ---- any teacher, by id (admin side) ----
 staffRouter.get('/:id/assignments', requirePermission('staff.view'), async (req, res) => {
-  ok(res, await me.getStaffAssignments(currentTenant(req), parseId(req.params.id)));
+  const tenant = currentTenant(req);
+  const { academicYearId } = assignmentYearQuery.parse(req.query);
+  const yearId = academicYearId === undefined ? undefined : await resolveAcademicYearId(tenant, academicYearId);
+  ok(res, await me.getStaffAssignments(tenant, parseId(req.params.id), yearId));
 });
 
 staffRouter.get('/:id/timetable', requirePermission('staff.view'), async (req, res) => {
-  ok(res, await me.getStaffTimetable(currentTenant(req), parseId(req.params.id)));
+  const { rows, today } = await me.getStaffTimetable(currentTenant(req), parseId(req.params.id));
+  ok(res, rows, { today });
 });
 
 staffRouter.get('/:id', requirePermission('staff.view'), async (req, res) => {
@@ -68,11 +74,13 @@ staffRouter.post('/:id/assignments', requirePermission('staff.edit'), async (req
 
 // Remove one subject of one class (all its sections) from a teacher.
 staffRouter.delete('/:id/assignments/:classId/:subjectId', requirePermission('staff.edit'), async (req, res) => {
+  const { academicYearId } = assignmentYearQuery.parse(req.query);
   await removeAssignment(
     currentTenant(req),
     parseId(req.params.id),
     parseId(req.params.classId),
     parseId(req.params.subjectId),
+    academicYearId,
   );
   noContent(res);
 });

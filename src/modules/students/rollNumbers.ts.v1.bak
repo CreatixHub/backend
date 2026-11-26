@@ -1,0 +1,88 @@
+import { Router } from 'express';
+import { and, asc, eq, isNull, sql } from 'drizzle-orm';
+import { z } from 'zod';
+import { db } from '../../db';
+import { admissions, classes, students } from '../../db/schema';
+import { HttpError } from '../../lib/errors';
+import { ok } from '../../lib/respond';
+import type { TenantContext } from '../../lib/tenant';
+import { currentTenant } from '../../middleware/authenticate';
+
+// ROLL NUMBERS: numbered 1, 2, 3 ... per class, in A-Z order of the student's name. Active students only.
+// A student's class comes from their admission record. Administrators only.
+
+export const rollNumbersRouter = Router();
+
+function requireAdmin(tenant: TenantContext) {
+  if (!(tenant.permissions.has('*') || tenant.roles.includes('admin'))) {
+    throw new HttpError(403, 'Only an administrator can manage roll numbers');
+  }
+}
+
+const displayName = sql<string>`coalesce(nullif(trim(${students.fullName}), ''), trim(${students.firstName} || ' ' || ${students.lastName}))`;
+
+async function classStudents(tenantId: bigint, classId: bigint) {
+  return db
+    .select({ id: students.id, name: displayName, admissionNo: students.admissionNo, rollNo: students.rollNo })
+    .from(students)
+    .innerJoin(admissions, eq(admissions.studentId, students.id))
+    .where(
+      and(
+        eq(students.tenantId, tenantId),
+        eq(admissions.tenantId, tenantId),
+        eq(admissions.classId, classId),
+        eq(students.status, 'active'),
+        isNull(students.deletedAt),
+        isNull(admissions.deletedAt),
+      ),
+    )
+    .orderBy(asc(sql`lower(${displayName})`), asc(students.id));
+}
+
+// GET /api/roll-numbers/classes
+rollNumbersRouter.get('/classes', async (req, res) => {
+  const tenant = currentTenant(req);
+  requireAdmin(tenant);
+  const rows = await db
+    .select({ id: classes.id, name: classes.name })
+    .from(classes)
+    .where(and(eq(classes.tenantId, tenant.id), isNull(classes.deletedAt)))
+    .orderBy(asc(classes.gradeLevel), asc(classes.name));
+  ok(res, rows.map((r) => ({ id: String(r.id), name: r.name })));
+});
+
+// GET /api/roll-numbers/preview?classId=  -> the class sorted A-Z with the roll number each student WOULD get
+rollNumbersRouter.get('/preview', async (req, res) => {
+  const tenant = currentTenant(req);
+  requireAdmin(tenant);
+  const { classId } = z.object({ classId: z.coerce.bigint().positive() }).parse(req.query);
+  const rows = await classStudents(tenant.id, classId);
+  ok(
+    res,
+    rows.map((r, i) => ({
+      id: String(r.id),
+      name: r.name,
+      admissionNo: r.admissionNo,
+      currentRoll: r.rollNo,
+      newRoll: i + 1,
+    })),
+  );
+});
+
+// POST /api/roll-numbers/generate { classId }  -> assigns 1..N in A-Z order (replaces this class's roll numbers)
+rollNumbersRouter.post('/generate', async (req, res) => {
+  const tenant = currentTenant(req);
+  requireAdmin(tenant);
+  const { classId } = z.object({ classId: z.coerce.bigint().positive() }).strict().parse(req.body);
+  const rows = await classStudents(tenant.id, classId);
+  if (rows.length === 0) throw new HttpError(400, 'There are no active students in this class');
+  await db.transaction(async (tx) => {
+    for (let i = 0; i < rows.length; i++) {
+      await tx
+        .update(students)
+        .set({ rollNo: i + 1 })
+        .where(and(eq(students.id, rows[i].id), eq(students.tenantId, tenant.id)));
+    }
+  });
+  ok(res, { count: rows.length });
+});

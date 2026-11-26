@@ -4,9 +4,12 @@ import { db } from '../../db';
 import { classes, classSubjects, sectionTeachers, sections, staff, subjects } from '../../db/schema';
 import { HttpError } from '../../lib/errors';
 import type { TenantContext } from '../../lib/tenant';
+import { resolveAcademicYearId } from '../academic-years/academicYears.service';
 import { saveAssignments } from './staff.assignments';
 
 const id = z.coerce.bigint().positive();
+
+export const assignmentYearQuery = z.object({ academicYearId: id.optional() });
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -123,6 +126,7 @@ export async function addAssignments(
   input: AddAssignmentsInput,
 ): Promise<void> {
   await assertTeacher(tenant.id, teacherId);
+  const academicYearId = await resolveAcademicYearId(tenant, input.academicYearId);
   await db.transaction(async (tx) => {
     await ensureDefaultSections(
       tx,
@@ -130,26 +134,32 @@ export async function addAssignments(
       input.assignments.map((a) => a.classId),
     );
     await ensureClassSubjects(tx, tenant.id, input.assignments);
-    await saveAssignments(tx, tenant.id, teacherId, input.academicYearId, input.assignments);
+    await saveAssignments(tx, tenant.id, teacherId, academicYearId, input.assignments);
   });
 }
 
-/** Removes one subject of one class (every section of that class) from the teacher. */
+/** Removes one subject of one class (every section of that class) for the requested or current year. */
 export async function removeAssignment(
   tenant: TenantContext,
   teacherId: bigint,
   classId: bigint,
   subjectId: bigint,
+  requestedYearId?: bigint,
 ): Promise<void> {
   await assertTeacher(tenant.id, teacherId);
+  const academicYearId = await resolveAcademicYearId(tenant, requestedYearId);
   await db.delete(sectionTeachers).where(
     and(
       eq(sectionTeachers.tenantId, tenant.id),
       eq(sectionTeachers.teacherId, teacherId),
       eq(sectionTeachers.subjectId, subjectId),
+      eq(sectionTeachers.academicYearId, academicYearId),
       inArray(
         sectionTeachers.sectionId,
-        db.select({ id: sections.id }).from(sections).where(eq(sections.classId, classId)),
+        db
+          .select({ id: sections.id })
+          .from(sections)
+          .where(and(eq(sections.tenantId, tenant.id), eq(sections.classId, classId))),
       ),
     ),
   );

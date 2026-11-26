@@ -19,6 +19,7 @@ import { assertStudentReadable, isRowScopedFor, resolveStudentScope, studentScop
 import { isForeignKeyViolation, isUniqueViolation } from '../../lib/pgErrors';
 import type { TenantContext } from '../../lib/tenant';
 import type { AuthUser } from '../../middleware/authenticate';
+import { resolveAcademicYearId } from '../academic-years/academicYears.service';
 import type {
   CreateFeeAssignmentInput,
   CreateFeeGroupInput,
@@ -361,6 +362,7 @@ export async function getFeeStructure(tenant: TenantContext, id: bigint) {
 
 export async function createFeeStructure(tenant: TenantContext, data: CreateFeeStructureInput) {
   await assertClassInTenant(tenant.id, data.classId);
+  const academicYearId = await resolveAcademicYearId(tenant, data.academicYearId);
   if (data.items) {
     for (const item of data.items) {
       await assertFeeTypeInTenant(tenant.id, item.feeTypeId);
@@ -373,7 +375,7 @@ export async function createFeeStructure(tenant: TenantContext, data: CreateFeeS
         .insert(feeStructures)
         .values({
           tenantId: tenant.id,
-          academicYearId: data.academicYearId,
+          academicYearId,
           classId: data.classId,
           name: data.name ?? null,
           code: data.code ?? null,
@@ -435,7 +437,9 @@ export async function updateFeeStructure(tenant: TenantContext, id: bigint, data
   if (data.classId !== undefined) await assertClassInTenant(tenant.id, data.classId);
 
   const patch: Partial<typeof feeStructures.$inferInsert> = {};
-  if (data.academicYearId !== undefined) patch.academicYearId = data.academicYearId;
+  if (data.academicYearId !== undefined) {
+    patch.academicYearId = await resolveAcademicYearId(tenant, data.academicYearId);
+  }
   if (data.classId !== undefined) patch.classId = data.classId;
   if (data.name !== undefined) patch.name = data.name;
   if (data.code !== undefined) patch.code = data.code;
@@ -713,6 +717,7 @@ export async function getInvoice(tenant: TenantContext, user: AuthUser, id: bigi
 
 export async function createInvoice(tenant: TenantContext, data: CreateInvoiceInput) {
   await assertStudentInTenant(tenant.id, data.studentId);
+  const academicYearId = await resolveAcademicYearId(tenant, data.academicYearId);
   if (data.installmentId != null) {
     const [inst] = await db
       .select({ id: feeInstallments.id })
@@ -734,7 +739,7 @@ export async function createInvoice(tenant: TenantContext, data: CreateInvoiceIn
           number: data.number ?? genCode('INV'),
           studentId: data.studentId,
           enrollmentId: data.enrollmentId ?? null,
-          academicYearId: data.academicYearId,
+          academicYearId,
           installmentId: data.installmentId ?? null,
           issuedOn: data.issuedOn,
           dueOn: data.dueOn,

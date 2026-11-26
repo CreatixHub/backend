@@ -1,5 +1,6 @@
 const UNIQUE_VIOLATION = '23505';
 const FOREIGN_KEY_VIOLATION = '23503';
+const DEADLOCK_DETECTED = '40P01';
 
 function pgField(e: unknown, field: 'code' | 'constraint'): unknown {
   if (typeof e !== 'object' || e === null) return undefined;
@@ -18,4 +19,8 @@ export function isForeignKeyViolation(e: unknown): boolean {
 export function pgConstraint(e: unknown): string | undefined {
   const value = pgField(e, 'constraint');
   return typeof value === 'string' ? value : undefined;
+}
+
+export function isDeadlock(e: unknown): boolean {
+  return pgField(e, 'code') === DEADLOCK_DETECTED;
 }

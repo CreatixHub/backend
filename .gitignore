@@ -22,4 +22,6 @@ resp.json
 
 # the top-level reference-material folder only (not any nested "docs" dir, e.g. src/docs/ is real app code)
 /docs/
+
+# uploaded files (student/admission photos) - UPLOAD_DIR defaults to this locally; never commit real uploads
 uploads/

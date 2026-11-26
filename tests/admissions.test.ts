@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { signupAndLogin, uniqueEmail, uniqueSlug, VALID_PASSWORD } from './helpers';
+import { currentAcademicYearId, signupAndLogin, uniqueEmail, uniqueSlug, VALID_PASSWORD } from './helpers';
 
 async function setupSchool(tag: string) {
   const { agent, switchOrganization } = await signupAndLogin(tag);
   const slug = uniqueSlug(tag);
   await agent.post('/api/organizations').send({ name: `${tag} School`, slug });
   await switchOrganization(slug);
+  const yearId = await currentAcademicYearId(agent);
 
   const cls = await agent.post('/api/classes').send({ gradeLevel: 5, name: 'Grade 5', code: `G5-${slug.slice(-4).toUpperCase()}` });
   const stf = await agent.post('/api/staff').send({
@@ -19,6 +20,7 @@ async function setupSchool(tag: string) {
   return {
     agent,
     slug,
+    yearId,
     classId: cls.body.data.id as string,
     staffId: stf.body.data.id as string,
   };
@@ -26,10 +28,10 @@ async function setupSchool(tag: string) {
 
 describe('admissions module', () => {
   it('creates, lists, retrieves and updates admission applications with initial status history', async () => {
-    const { agent, classId, staffId } = await setupSchool('adm-crud');
+    const { agent, classId, staffId, yearId } = await setupSchool('adm-crud');
 
     const createRes = await agent.post('/api/admissions').send({
-      academicYearId: '1',
+      academicYearId: yearId,
       classId,
       firstName: 'Aarav',
       lastName: 'Sharma',
@@ -98,11 +100,11 @@ describe('admissions module', () => {
   });
 
   it('rejects duplicate applicationNo and invalid validation/missing records', async () => {
-    const { agent, classId } = await setupSchool('adm-val');
+    const { agent, classId, yearId } = await setupSchool('adm-val');
 
     const r1 = await agent.post('/api/admissions').send({
       applicationNo: 'APP-CUSTOM-1',
-      academicYearId: '1',
+      academicYearId: yearId,
       classId,
       firstName: 'Diya',
       lastName: 'Menon',
@@ -115,7 +117,7 @@ describe('admissions module', () => {
 
     const dup = await agent.post('/api/admissions').send({
       applicationNo: 'APP-CUSTOM-1',
-      academicYearId: '1',
+      academicYearId: yearId,
       classId,
       firstName: 'Other',
       lastName: 'Child',
@@ -127,7 +129,7 @@ describe('admissions module', () => {
     expect(dup.status).toBe(409);
 
     const bad = await agent.post('/api/admissions').send({
-      academicYearId: '1',
+      academicYearId: yearId,
       classId,
       firstName: 'Bad',
       lastName: 'Date',
@@ -143,10 +145,10 @@ describe('admissions module', () => {
   });
 
   it('tracks status transitions and atomically creates student + guardian when accepted', async () => {
-    const { agent, classId } = await setupSchool('adm-accept');
+    const { agent, classId, yearId } = await setupSchool('adm-accept');
 
     const created = await agent.post('/api/admissions').send({
-      academicYearId: '1',
+      academicYearId: yearId,
       classId,
       firstName: 'Kabir',
       lastName: 'Verma',
@@ -228,7 +230,7 @@ describe('admissions module', () => {
     const schoolB = await setupSchool('adm-iso-b');
 
     const created = await schoolA.agent.post('/api/admissions').send({
-      academicYearId: '1',
+      academicYearId: schoolA.yearId,
       classId: schoolA.classId,
       firstName: 'Riya',
       lastName: 'Das',
@@ -247,7 +249,7 @@ describe('admissions module', () => {
     expect(
       (
         await schoolB.agent.post('/api/admissions').send({
-          academicYearId: '1',
+          academicYearId: schoolB.yearId,
           classId: schoolA.classId,
           firstName: 'Leak',
           lastName: 'Attempt',

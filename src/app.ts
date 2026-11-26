@@ -1,4 +1,4 @@
-import cookieParser from "cookie-parser";
+﻿import cookieParser from "cookie-parser";
 import cors from "cors";
 import express from "express";
 import rateLimit from "express-rate-limit";
@@ -17,12 +17,17 @@ import { authenticate } from "./middleware/authenticate";
 import { privateAuthRouter } from "./modules/auth/auth.routes";
 import { docsEnabled, docsRouter } from "./docs/docs.routes";
 import { membersRouter } from "./modules/members/members.routes";
+import { academicYearsRouter } from "./modules/academic-years/academicYears.routes";
 import { organizationsRouter } from "./modules/organizations/organizations.routes";
 import { permissionsRouter, rolesRouter } from "./modules/roles/roles.routes";
 import { staffRouter } from "./modules/staff/staff.routes";
+import { myClassRouter } from "./modules/staff/staff.myClass";
 import { subjectsRouter } from "./modules/subjects/subjects.routes";
 import { classesRouter, sectionsRouter } from "./modules/classes/classes.routes";
+import { classTeachersRouter } from "./modules/classTeachers/classTeachers.routes";
+import { feeCollectionRouter, feeStructurePublishRouter } from "./modules/feeCollection/feeCollection.routes";
 import { sectionTeachersRouter, timeSlotsRouter, timetableRouter } from "./modules/timetable/timetable.routes";
+import { plannerRouter } from "./modules/timetable-planner/planner.routes";
 import { homeworkRouter, homeworkSubmissionsRouter } from "./modules/homework/homework.routes";
 import {
   driversRouter,
@@ -40,7 +45,20 @@ import {
 } from "./modules/assets/assets.routes";
 import { admissionsRouter } from "./modules/admissions/admissions.routes";
 import { filesRouter } from "./modules/files/files.routes";
+import { myPhotoRouter } from "./modules/files/myPhoto";
+import { notesRouter } from "./modules/notes/notes.routes";
+import { leaveRouter } from "./modules/leave/leave.routes";
+import { responsibilitiesRouter } from "./modules/responsibilities/responsibilities.routes";
+import { classViewRouter } from "./modules/classview/classview.routes";
+import { feeSyncRouter } from "./modules/feeSync/feeSync.routes";
+import { razorpayRouter } from "./modules/razorpay/razorpay.routes";
+import { profilesRouter } from "./modules/profiles/profiles.routes";
+import { homeworkPlusRouter } from "./modules/homeworkPlus/homeworkPlus.routes";
+import { rollNumbersRouter } from "./modules/students/rollNumbers";
+import { promotionRouter } from "./modules/promotion/promotion.routes";
+import { transportBillingRouter } from "./modules/transport/transportBilling";
 import { guardiansRouter, studentHousesRouter, studentsRouter } from "./modules/students/students.routes";
+import { guardianDirectoryRouter } from "./modules/guardianDirectory/guardianDirectory.routes";
 import {
   attendanceRulesRouter,
   calendarEventsRouter,
@@ -61,6 +79,9 @@ import {
 import { expenseCategoriesRouter, expensesRouter } from "./modules/expenses/expenses.routes";
 import { exitPassesRouter } from "./modules/gatepass/gatepass.routes";
 import { reportsRouter } from "./modules/reports/reports.routes";
+import { libraryBooksRouter, libraryIssuesRouter } from "./modules/library/library.routes";
+import { periodAttendanceRouter } from "./modules/periodAttendance/periodAttendance.routes";
+import { notificationsRouter } from "./modules/notifications/notifications.routes";
 
 // Building the app in a function (instead of starting the server here) lets tests use it too.
 // The ORDER of the lines below is the security design: Express runs them top to bottom.
@@ -83,11 +104,11 @@ export function createApp() {
   app.use(
     rateLimit({
       windowMs: 60_000,
-      limit: 100,
+      limit: config.API_RATE_LIMIT,
       standardHeaders: true,
       legacyHeaders: false,
     }),
-  ); // 100 req/min/IP
+  ); // config.API_RATE_LIMIT req/min/IP (default 100)
 
   // ---- API documentation: /api/docs (Swagger UI) and /api/openapi.json. Public, so BEFORE authenticate; off in production. ----
   if (docsEnabled) app.use("/api", docsRouter());
@@ -104,33 +125,49 @@ export function createApp() {
   app.use("/api/auth", privateAuthRouter); // me, switch-organization
   app.use("/api/organizations", organizationsRouter);
   app.use("/api/members", membersRouter);
+  app.use("/api/academic-years", academicYearsRouter);
   app.use("/api/roles", rolesRouter);
   app.use("/api/permissions", permissionsRouter);
+  app.use("/api/staff/me/class", myClassRouter); // before /api/staff so it is found first
   app.use("/api/staff", staffRouter);
   app.use("/api/subjects", subjectsRouter);
   app.use("/api/classes", classesRouter);
+  app.use("/api/class-teachers", classTeachersRouter);
   app.use("/api/sections", sectionsRouter);
   app.use("/api/time-slots", timeSlotsRouter);
   app.use("/api/section-teachers", sectionTeachersRouter);
   app.use("/api/timetable", timetableRouter);
+  app.use("/api/timetable-planner", plannerRouter);
   app.use("/api/homework", homeworkRouter);
   app.use("/api/homework-submissions", homeworkSubmissionsRouter);
+  app.use("/api/notes", notesRouter);
+  app.use("/api/leave", leaveRouter);
+  app.use("/api/responsibilities", responsibilitiesRouter);
+  app.use("/api/class-view", classViewRouter);
+  app.use("/api/fee-sync", feeSyncRouter);
+  app.use("/api/roll-numbers", rollNumbersRouter);
+  app.use("/api/promotion", promotionRouter);
   app.use("/api/vehicles", vehiclesRouter);
   app.use("/api/drivers", driversRouter);
   app.use("/api/transport-routes", transportRoutesRouter);
   app.use("/api/pickup-points", pickupPointsRouter);
   app.use("/api/route-schedules", routeSchedulesRouter);
   app.use("/api/transport-assignments", transportAssignmentsRouter);
+app.use("/api/transport-billing", transportBillingRouter);
   app.use("/api/asset-categories", assetCategoriesRouter);
   app.use("/api/assets", assetsRouter);
   app.use("/api/asset-allocations", assetAllocationsRouter);
   app.use("/api/asset-maintenance", assetMaintenanceRouter);
   app.use("/api/admissions", admissionsRouter);
+  app.use("/api/files/me", myPhotoRouter); // before /api/files so it is found first
   app.use("/api/files", filesRouter);
   app.use("/api/students", studentsRouter);
   app.use("/api/guardians", guardiansRouter);
+  app.use("/api/guardian-directory", guardianDirectoryRouter);
   app.use("/api/student-houses", studentHousesRouter);
   app.use("/api/student-attendance", studentAttendanceRouter);
+  app.use("/api/period-attendance", periodAttendanceRouter);
+  app.use("/api/notifications", notificationsRouter);
   app.use("/api/staff-attendance", staffAttendanceRouter);
   app.use("/api/attendance-rules", attendanceRulesRouter);
   app.use("/api/calendar-events", calendarEventsRouter);
@@ -140,12 +177,19 @@ export function createApp() {
   app.use("/api/fee-groups", feeGroupsRouter);
   app.use("/api/fee-types", feeTypesRouter);
   app.use("/api/fee-structures", feeStructuresRouter);
+  app.use("/api/fee-structures", feeStructurePublishRouter);
   app.use("/api/fee-assignments", feeAssignmentsRouter);
   app.use("/api/invoices", invoicesRouter);
   app.use("/api/payments", paymentsRouter);
+  app.use("/api/fee-collection", feeCollectionRouter);
+  app.use("/api/razorpay", razorpayRouter);
+app.use("/api/profiles", profilesRouter);
+app.use("/api/homework-plus", homeworkPlusRouter);
   app.use("/api/expense-categories", expenseCategoriesRouter);
   app.use("/api/expenses", expensesRouter);
   app.use("/api/exit-passes", exitPassesRouter);
+  app.use("/api/library-books", libraryBooksRouter);
+  app.use("/api/library-issues", libraryIssuesRouter);
   app.use("/api/reports", reportsRouter);
 
   app.use((_req, _res, next) => next(new HttpError(404, "Not found"))); // nothing matched

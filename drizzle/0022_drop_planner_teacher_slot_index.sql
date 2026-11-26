@@ -1,0 +1,1 @@
+DROP INDEX "timetable_entries_planner_teacher_slot_key";

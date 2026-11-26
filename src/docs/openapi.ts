@@ -6,6 +6,15 @@ import { createOrganizationSchema, updateOrganizationSchema } from '../modules/o
 import { createRoleSchema, updateRoleSchema } from '../modules/roles/roles.schemas';
 import { createStaffSchema, listStaffSchema, updateStaffSchema } from '../modules/staff/staff.schemas';
 import { createSubjectSchema, listSubjectsSchema, updateSubjectSchema } from '../modules/subjects/subjects.schemas';
+import { createAcademicYearSchema, updateAcademicYearSchema } from '../modules/academic-years/academicYears.schemas';
+import {
+  availabilityKindSchema, copyLessonSchema, createRoomGroupSchema, plannerIdSchema, plannerYearQuerySchema,
+  saveAvailabilitySchema, saveBellSchema, saveLessonSchema, saveRoomGroupSchema, saveRulesSchema, saveSectionExcludedSchema,
+} from '../modules/timetable-planner/planner.schemas';
+import {
+  blockQuerySchema, blockSchema, createVersionSchema, generateVersionSchema, lockBlockSchema, positionSchema, publishVersionSchema,
+  renameVersionSchema,
+} from '../modules/timetable-planner/planner.version-schemas';
 import {
   createClassSchema, createSectionSchema, listClassesSchema, listSectionsSchema, setClassSubjectsSchema,
   updateClassSchema, updateSectionSchema,
@@ -64,7 +73,7 @@ import {
   useExitPassSchema, verifyExitPassSchema,
 } from '../modules/gatepass/gatepass.schemas';
 import {
-  Admission, AdmissionStatusHistoryItem, Asset, AssetAllocation, AssetCategory, AssetMaintenance, AttendanceRule,
+  AcademicYear, Admission, AdmissionStatusHistoryItem, Asset, AssetAllocation, AssetCategory, AssetMaintenance, AttendanceRule,
   CalendarEvent, ClassRow, ClassSubject, CreatedOrganization, CurrentOrganization, Driver, ErrorResponse, ExitPass,
   Expense, ExpenseCategory, FeeAssignment, FeeGroup, FeeInstallment, FeeStructure, FeeStructureItem, FeeType,
   Guardian, Health, Homework, HomeworkSubmission, Invoice, InvoiceLine, LeaveBalance, LeaveRequest, LeaveType, Me,
@@ -424,10 +433,30 @@ crud({
   listDescription: 'Paged. `q` searches name, employee number and email.',
   withGetOne: true,
   createBody: createStaffSchema, createDescription: 'National ID, PAN and bank account are encrypted at rest and never returned - the response only says whether one is on file.',
-  createExample: { firstName: 'Priya', lastName: 'Nair', staffType: 'teaching', employmentType: 'full_time', joinedOn: '2026-06-01' },
+  createExample: { firstName: 'Priya', lastName: 'Nair', staffType: 'teaching', employmentType: 'full_time', joinedOn: '2026-06-01', primarySubjectId: '201', additionalSubjectIds: ['202'], maxPeriodsPerWeek: 30 },
   conflict: { description: 'That employee number or login account is already used in this school.', message: 'That employee number is already used in this school' },
   updateBody: updateStaffSchema, updateExample: { phone: '9876543210' },
   withDelete: true, deleteSummary: 'Retire a staff member', deleteDescription: 'Soft delete: the row stays (history, payroll later), it just disappears from every list and lookup.',
+});
+
+// ---------------------------------------------------------------- Academic years
+crud({
+  tag: 'Academic years', base: '/academic-years', module: 'academics', resourceName: 'academic year', idDesc: 'The academic year id from GET /academic-years',
+  item: AcademicYear, listDescription: 'Every year of the school, newest first. Exactly one is current.',
+  createBody: createAcademicYearSchema, createExample: { name: '2027-28', startsOn: '2027-06-01', endsOn: '2028-05-31' },
+  createDescription: "The school's first year is always made current. For later years send `isCurrent: true` to make the new year current (the previous current year is cleared in the same step).",
+  conflict: { description: 'That name is already used in this school.', message: 'That academic year name is already used in this school' },
+  updateBody: updateAcademicYearSchema, updateExample: { isCurrent: true },
+  updateDescription: "`isCurrent` can only be set to `true`: making a year current clears the school's previous current year in one step.",
+});
+
+registry.registerPath({
+  method: 'get', path: '/academic-years/current', tags: ['Academic years'], summary: "The school's current academic year",
+  description: 'Open to **any signed-in member** of the school: no permission code is needed (the year id is not sensitive and every screen that creates year-scoped data needs it).', security: bearer,
+  responses: {
+    200: reply('The current year.', envelope('CurrentAcademicYearResponse', AcademicYear)), 401: E.unauthorized, 403: E.noPermission, // 403 only when the token has no school yet
+    404: fail('The school has no academic year set up.', 'No academic year is set up'),
+  },
 });
 
 // ---------------------------------------------------------------- Subjects
@@ -483,7 +512,9 @@ crud({
 crud({
   tag: 'Timetable', base: '/time-slots', module: 'timetable', resourceName: 'time slot', idDesc: 'The time slot id',
   item: TimeSlot, listQuery: listTimeSlotsSchema,
-  createBody: createTimeSlotSchema, createExample: { name: 'Period 1', sequence: 1, startsAt: '09:00', endsAt: '09:40' },
+  listDescription: 'The bell. Each slot belongs to a dayType (default "usual") and runs on some weekdays (default Mon-Sat); slots that share a weekday cannot overlap in time, and a sequence number is unique within a dayType.',
+  createBody: createTimeSlotSchema,
+  createExample: { name: 'Period 1', dayType: 'friday', days: [5], sequence: 1, startsAt: '09:00', endsAt: '09:40' },
   updateBody: updateTimeSlotSchema, updateExample: { endsAt: '09:45' },
   withDelete: true,
 });
@@ -500,11 +531,323 @@ crud({
 crud({
   tag: 'Timetable', base: '/timetable', module: 'timetable', resourceName: 'timetable entry', idDesc: 'The entry id',
   item: TimetableEntry, listQuery: listEntriesSchema, paged: true,
-  listDescription: '`onDate` returns only entries in effect on that date. Creating a clashing entry (same section, teacher, classroom or break slot at the same time) is refused.',
+  listDescription: '`onDate` returns only entries in effect on that date. Use `onDate=today` for the current date in the school timezone, returned as `meta.today`. Creating a clashing entry (same section, teacher, classroom or break slot at the same time) is refused, and so is a day the chosen time slot does not run on. Rows written by the timetable planner (`source: "planner"`) can have no subject or teacher: `subjectName` then shows their `title`. Entries made here always need a subject and a teacher and are stored with `source: "manual"`.',
   createBody: createEntrySchema, createExample: { sectionId: '302', subjectId: '201', timeSlotId: '401', dayOfWeek: 1, academicYearId: '1', effectiveFrom: '2026-06-01' },
   conflict: { description: 'The section, teacher, classroom or time slot already has an entry that overlaps this one.', message: 'That section, teacher or classroom already has an entry at this time' },
   updateBody: updateEntrySchema, updateExample: { classroomId: '12' },
   withDelete: true,
+});
+
+// ---------------------------------------------------------------- Timetable planner
+const plannerBell = z.object({
+  weekType: z.literal('weekly'),
+  dayTypes: z.array(z.object({
+    id: z.string(), name: z.string(), days: z.array(z.number().int()),
+    periods: z.array(z.object({
+      id: z.string(), name: z.string(), startsAt: z.string(), endsAt: z.string(), isBreak: z.boolean(),
+    })),
+  })),
+});
+const plannerRules = z.record(z.object({
+  value: z.union([z.number(), z.boolean()]), level: z.enum(['off', 'low', 'medium', 'high', 'critical']),
+}));
+const plannerRuleConfig = z.object({ defaults: plannerRules, teachers: z.record(plannerRules), sections: z.record(plannerRules) });
+const plannerBlocked = z.array(z.object({ day: z.number().int(), period: z.number().int() }));
+const plannerIdAndName = z.object({ id: plannerIdSchema, name: z.string() });
+const plannerRoom = plannerIdAndName.extend({
+  groupId: plannerIdSchema.nullable(), type: z.string(), capacity: z.number().int().nullable(),
+});
+const plannerLesson = z.object({
+  id: plannerIdSchema,
+  academicYearId: plannerIdSchema,
+  sectionIds: z.array(plannerIdSchema),
+  subjectId: plannerIdSchema.nullable(),
+  activityName: z.string().nullable(),
+  syncGroup: z.string().nullable(),
+  parts: z.array(z.object({
+    id: z.string(), label: z.string().optional(), teacherIds: z.array(plannerIdSchema), mode: z.enum(['together', 'one_of']),
+    pattern: z.array(z.object({ count: z.number().int(), length: z.number().int() })),
+    room: z.object({
+      type: z.enum(['none', 'fixed', 'oneOf', 'any']),
+      roomIds: z.array(plannerIdSchema).optional(), groupId: plannerIdSchema.nullable().optional(),
+    }),
+  })),
+});
+const plannerIssue = z.object({
+  code: z.string(), message: z.string(), sectionId: plannerIdSchema.optional(),
+  teacherId: plannerIdSchema.optional(), subjectId: plannerIdSchema.optional(),
+});
+
+const plannerVersionSummary = z.object({
+  id: plannerIdSchema, name: z.string(), status: z.enum(['draft', 'published', 'archived']),
+  academicYearId: plannerIdSchema, createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
+  generatedAt: z.string().datetime().nullable(), publishedAt: z.string().datetime().nullable(),
+  seed: z.number().int(), lessonCount: z.number().int(), canRestore: z.boolean(),
+});
+
+const plannerVersionReports = z.object({
+  insights: z.object({
+    perfect: z.number().int(), poor: z.number().int(), total: z.number().int(), days: z.array(z.number().int()),
+    rows: z.array(z.object({
+      sectionId: plannerIdSchema, section: z.string(), subjectName: z.string(), teachers: z.array(z.string()),
+      units: z.number().int(), unitLength: z.number().int(), actual: z.array(z.number().int()), ideal: z.string(),
+      poor: z.boolean(), issue: z.string().nullable(),
+    })),
+  }),
+  workload: z.array(z.object({
+    teacherId: plannerIdSchema, name: z.string(), perDay: z.array(z.number().int()),
+    total: z.number().int(), max: z.number().int(),
+  })),
+});
+
+const plannerVersionDetail = plannerVersionReports.extend({
+  version: plannerVersionSummary, bell: plannerBell, days: z.array(z.number().int()), dayLabels: z.record(z.string()),
+  entries: z.array(z.object({
+    id: z.string(), blockId: z.string(), unitKey: z.string(), lessonId: plannerIdSchema, partId: z.string(), label: z.string(),
+    sectionId: plannerIdSchema, subjectId: plannerIdSchema.nullable(), subjectName: z.string(), teacherIds: z.array(plannerIdSchema),
+    roomIds: z.array(plannerIdSchema), day: z.number().int(), startNo: z.number().int(), length: z.number().int(), locked: z.boolean(),
+  })),
+  unplaced: z.array(z.object({
+    blockId: z.string(), lessonId: plannerIdSchema, partId: z.string(), sectionIds: z.array(plannerIdSchema),
+    subjectName: z.string(), length: z.number().int(), teacherIds: z.array(plannerIdSchema),
+    reasons: z.array(z.string()), placeable: z.boolean(),
+  })),
+  stats: z.object({
+    blocks: z.number().int(), placedBlocks: z.number().int(), totalPeriods: z.number().int(),
+    placedPeriods: z.number().int(), penalty: z.number(),
+  }),
+  emptyPeriods: z.array(z.object({
+    kind: z.enum(['gap', 'late_start', 'unfilled', 'blank']), sectionId: plannerIdSchema, section: z.string(),
+    day: z.number().int().nullable(), period: z.number().int().nullable(), count: z.number().int(),
+    message: z.string(), fix: z.string(),
+  })),
+  dropped: z.array(z.object({ blockId: z.string(), reason: z.string() })),
+  criticalViolations: z.array(z.string()), requiresRegeneration: z.boolean(),
+});
+
+function plannerPath(opts: {
+  method: 'get' | 'post' | 'patch' | 'delete';
+  path: string;
+  summary: string;
+  responseName?: string;
+  response?: z.ZodTypeAny;
+  body?: z.ZodTypeAny;
+  params?: z.AnyZodObject;
+  query?: z.AnyZodObject;
+  permission?: string;
+  successStatus?: 200 | 201 | 204;
+  bodyRequired?: boolean;
+  rateLimited?: boolean;
+}) {
+  const {
+    method, path, summary, body, params, response, responseName, query = plannerYearQuerySchema,
+    permission = 'timetable.edit', successStatus = method === 'post' ? 201 : method === 'delete' ? 204 : 200,
+    bodyRequired = true, rateLimited = false,
+  } = opts;
+  const success = response && responseName
+    ? reply(summary, envelope(responseName, response))
+    : { description: 'Deleted.' };
+  registry.registerPath({
+    method, path: `/timetable-planner${path}`, tags: ['Timetable planner'], summary,
+    description: 'Defaults to the current academic year when no year is supplied.' + needs(permission),
+    security: bearer,
+    request: { query, params, ...(body ? { body: { required: bodyRequired, ...json(body) } } : {}) },
+    responses: {
+      [successStatus]: success,
+      400: E.validation, 401: E.unauthorized, 403: E.noPermission,
+      404: fail('The academic year or planner resource is unavailable in this school.', 'Not found'),
+      409: fail('The school has no current academic year or the planner change conflicts with existing data.', 'Conflict'),
+      ...(rateLimited ? { 429: fail('Another timetable is being generated.', 'Too many requests') } : {}),
+    },
+  });
+}
+
+plannerPath({
+  method: 'get', path: '/state', summary: 'Read the planner settings and teaching plan', responseName: 'PlannerStateResponse',
+  response: z.object({
+    revision: z.number().int(), bell: plannerBell, rules: plannerRuleConfig,
+    availability: z.object({ staff: z.record(plannerBlocked), section: z.record(plannerBlocked), room: z.record(plannerBlocked) }),
+    rooms: z.array(plannerRoom), roomGroups: z.array(plannerIdAndName), lessons: z.array(plannerLesson),
+    versions: z.array(plannerVersionSummary), dayLabels: z.record(z.string()), sampleLoaded: z.boolean(),
+    lookups: z.object({
+      sections: z.array(plannerIdAndName.extend({
+        classId: plannerIdSchema, className: z.string(), capacity: z.number().int(), excluded: z.boolean(),
+      })),
+      staff: z.array(plannerIdAndName.extend({
+        staffType: z.string(), primarySubjectId: plannerIdSchema.nullable(), subjectIds: z.array(plannerIdSchema),
+        maxPeriodsPerWeek: z.number().int().nullable(), plannedPeriods: z.number().int(),
+      })),
+      subjects: z.array(plannerIdAndName.extend({ code: z.string() })),
+      defaultRules: plannerRules,
+    }),
+  }),
+});
+plannerPath({
+  method: 'patch', path: '/bell', summary: 'Save the weekly bell',
+  body: saveBellSchema, responseName: 'PlannerBellResponse', response: plannerBell,
+});
+plannerPath({
+  method: 'patch', path: '/rules', summary: 'Save timetable rules',
+  body: saveRulesSchema, responseName: 'PlannerRulesResponse', response: plannerRuleConfig,
+});
+plannerPath({
+  method: 'patch', path: '/availability/{kind}/{id}', summary: 'Set blocked periods for a teacher, section or room',
+  params: idParam('The teacher, section or room id').extend({ kind: availabilityKindSchema }),
+  body: saveAvailabilitySchema, responseName: 'PlannerAvailabilityResponse', response: z.object({ blocked: plannerBlocked }),
+});
+plannerPath({
+  method: 'patch', path: '/sections/{id}/excluded', summary: 'Include or exclude a section from the teaching plan',
+  params: idParam('The section id'), body: saveSectionExcludedSchema,
+  responseName: 'PlannerSectionExcludedResponse', response: z.object({ id: plannerIdSchema, excluded: z.boolean() }),
+});
+plannerPath({
+  method: 'post', path: '/room-groups', summary: 'Create a school room group',
+  body: createRoomGroupSchema, responseName: 'PlannerCreateRoomGroupResponse', response: plannerIdAndName,
+});
+plannerPath({ method: 'delete', path: '/room-groups/{id}', summary: 'Delete a room group', params: idParam('The room group id') });
+plannerPath({
+  method: 'patch', path: '/rooms/{id}', summary: 'Change an existing classroom’s group',
+  params: idParam('The classroom id'), body: saveRoomGroupSchema, responseName: 'PlannerRoomResponse', response: plannerRoom,
+});
+plannerPath({
+  method: 'post', path: '/lessons', summary: 'Add a teaching plan lesson',
+  body: saveLessonSchema, responseName: 'PlannerCreateLessonResponse', response: plannerLesson,
+});
+plannerPath({
+  method: 'patch', path: '/lessons/{id}', summary: 'Replace a teaching plan lesson',
+  params: idParam('The lesson id'), body: saveLessonSchema, responseName: 'PlannerUpdateLessonResponse', response: plannerLesson,
+});
+plannerPath({ method: 'delete', path: '/lessons/{id}', summary: 'Delete a teaching plan lesson', params: idParam('The lesson id') });
+plannerPath({
+  method: 'post', path: '/lessons/{id}/copy', summary: 'Copy a lesson to other sections',
+  params: idParam('The source lesson id'), body: copyLessonSchema, responseName: 'PlannerCopyLessonResponse',
+  response: z.array(plannerLesson),
+});
+plannerPath({
+  method: 'get', path: '/readiness', summary: 'Check the plan before timetable generation', responseName: 'PlannerReadinessResponse',
+  response: z.object({
+    ok: z.boolean(), blocking: z.array(plannerIssue), warnings: z.array(plannerIssue),
+    summary: z.object({
+      lessons: z.number().int(), periods: z.number().int(), sections: z.number().int(),
+      teachers: z.number().int(), days: z.number().int(),
+    }),
+  }),
+});
+
+const plannerVersionId = idParam('The timetable version id');
+const plannerSoftDelta = z.number().nullable().optional();
+
+plannerPath({
+  method: 'post', path: '/generate', summary: 'Generate or regenerate a draft', permission: 'timetable.create',
+  body: generateVersionSchema, bodyRequired: false, responseName: 'PlannerGeneratedVersionResponse', rateLimited: true,
+  response: plannerVersionDetail.extend({
+    generation: z.object({
+      ms: z.number(), iterations: z.number().int(), moves: z.number().int(),
+      seed: z.number().int(), warnings: z.array(z.string()),
+    }),
+  }),
+});
+plannerPath({
+  method: 'get', path: '/versions', summary: 'List timetable versions',
+  responseName: 'PlannerVersionsResponse', response: z.array(plannerVersionSummary),
+});
+plannerPath({
+  method: 'post', path: '/versions', summary: 'Create an empty draft', permission: 'timetable.create', bodyRequired: false,
+  body: createVersionSchema, responseName: 'PlannerCreatedVersionResponse', response: plannerVersionDetail,
+});
+plannerPath({
+  method: 'get', path: '/versions/{id}', summary: 'Read a timetable version', params: plannerVersionId,
+  responseName: 'PlannerVersionResponse', response: plannerVersionDetail,
+});
+plannerPath({
+  method: 'patch', path: '/versions/{id}', summary: 'Rename a draft', params: plannerVersionId,
+  body: renameVersionSchema, responseName: 'PlannerRenamedVersionResponse', response: plannerVersionSummary,
+});
+plannerPath({
+  method: 'delete', path: '/versions/{id}', summary: 'Delete a draft', params: plannerVersionId, permission: 'timetable.delete',
+});
+plannerPath({
+  method: 'post', path: '/versions/{id}/duplicate', summary: 'Copy a timetable to a draft', permission: 'timetable.create',
+  params: plannerVersionId, responseName: 'PlannerDuplicateVersionResponse', response: plannerVersionDetail,
+});
+plannerPath({
+  method: 'get', path: '/versions/{id}/reports', summary: 'Read timetable insights and workload', params: plannerVersionId,
+  responseName: 'PlannerVersionReportsResponse', response: plannerVersionReports,
+});
+plannerPath({
+  method: 'get', path: '/versions/{id}/fit', summary: 'Show where a lesson fits', params: plannerVersionId, query: blockQuerySchema,
+  responseName: 'PlannerFitResponse', response: z.object({
+    blockId: z.string(), positions: z.array(z.object({
+      day: z.number().int(), first: z.number().int(), ok: z.boolean(), softDelta: z.number().nullable(),
+      reason: z.string().nullable(), reasons: z.array(z.string()),
+    })),
+  }),
+});
+plannerPath({
+  method: 'get', path: '/versions/{id}/teacher-availability', summary: 'Show the lesson teachers’ weekly availability',
+  params: plannerVersionId, query: blockQuerySchema,
+  responseName: 'PlannerVersionTeacherAvailabilityResponse', response: z.object({
+    blockId: z.string(), subjectId: plannerIdSchema.nullable(),
+    teachers: z.array(z.object({
+      id: plannerIdSchema, name: z.string(), role: z.enum(['assigned', 'primary', 'additional']),
+      planned: z.number().int(), max: z.number().int().nullable(), atMax: z.boolean(),
+      days: z.array(z.object({ day: z.number().int(), periods: z.array(z.object({
+        no: z.number().int(), state: z.enum(['free', 'busy', 'blocked']), with: z.string().optional(),
+      })) })),
+    })),
+  }),
+});
+plannerPath({
+  method: 'post', path: '/versions/{id}/check-move', summary: 'Check a lesson move', params: plannerVersionId,
+  body: positionSchema, successStatus: 200, responseName: 'PlannerCheckMoveResponse',
+  response: z.object({
+    ok: z.boolean(), blockers: z.array(z.object({ kind: z.string(), id: z.string().optional(), message: z.string() })),
+    softDelta: plannerSoftDelta,
+  }),
+});
+plannerPath({
+  method: 'post', path: '/versions/{id}/move', summary: 'Move a scheduled draft lesson', params: plannerVersionId,
+  body: positionSchema, successStatus: 200, responseName: 'PlannerMoveResponse',
+  response: plannerVersionDetail.extend({ moved: z.boolean(), softDelta: plannerSoftDelta }),
+});
+plannerPath({
+  method: 'post', path: '/versions/{id}/place', summary: 'Place a draft lesson', params: plannerVersionId,
+  body: positionSchema, successStatus: 200, responseName: 'PlannerPlaceResponse',
+  response: plannerVersionDetail.extend({ placed: z.boolean(), softDelta: plannerSoftDelta }),
+});
+plannerPath({
+  method: 'post', path: '/versions/{id}/unschedule', summary: 'Remove a lesson from the draft grid', params: plannerVersionId,
+  body: blockSchema, successStatus: 200, responseName: 'PlannerUnscheduleResponse',
+  response: plannerVersionDetail.extend({ unscheduled: z.boolean() }),
+});
+plannerPath({
+  method: 'post', path: '/versions/{id}/lock', summary: 'Lock or unlock a draft lesson', params: plannerVersionId,
+  body: lockBlockSchema, successStatus: 200, responseName: 'PlannerLockResponse',
+  response: plannerVersionDetail.extend({ locked: z.boolean() }),
+});
+plannerPath({
+  method: 'get', path: '/versions/{id}/publish-preview', summary: 'Preview what publishing a draft would change',
+  params: plannerVersionId, responseName: 'PlannerPublishPreviewResponse',
+  response: z.object({
+    revision: z.string().describe('Send this value with publish to confirm the preview you reviewed.'),
+    academicYearId: plannerIdSchema, sectionIds: z.array(plannerIdSchema), classes: z.number().int(),
+    classEntries: z.number().int().describe('Class periods: a team-taught period counts once.'),
+    teacherEntries: z.number().int().describe('Timetable rows that name a teacher (a team-taught period has one per teacher).'),
+    teachers: z.number().int(), periodRows: z.number().int(), plannerEntriesReplaced: z.number().int(),
+    manualEntriesArchived: z.number().int(),
+    blockers: z.array(z.string()).describe('Everything that would stop the publication, including clashes with other classes.'),
+    unplaced: z.number().int(),
+  }),
+});
+plannerPath({
+  method: 'post', path: '/versions/{id}/publish', summary: 'Publish a draft as the school timetable', permission: 'timetable.manage',
+  params: plannerVersionId, body: publishVersionSchema, bodyRequired: false, responseName: 'PlannerPublishResponse',
+  response: z.object({ entries: z.number().int().describe('Timetable rows written.') }),
+});
+plannerPath({
+  method: 'post', path: '/versions/{id}/restore', summary: 'Restore the timetable that was published before this one',
+  permission: 'timetable.manage', params: plannerVersionId, successStatus: 200, responseName: 'PlannerRestoreResponse',
+  response: z.object({ restored: z.boolean() }),
 });
 
 // ---------------------------------------------------------------- Homework (LMS basic)
@@ -1194,9 +1537,11 @@ export function buildOpenApiDocument() {
       { name: 'Members', description: 'People in a school' },
       { name: 'Roles and permissions' },
       { name: 'Staff', description: 'Teaching and non-teaching staff' },
+      { name: 'Academic years', description: 'The school years (2026-27 ...); one is current. Year-scoped data points at one of these.' },
       { name: 'Subjects' },
       { name: 'Classes', description: 'Classes, sections and which subjects each class takes' },
       { name: 'Timetable', description: 'Time slots, section-teacher assignments, the weekly schedule' },
+      { name: 'Timetable planner', description: 'Year-specific bell, availability, teaching plan and readiness' },
       { name: 'Homework', description: 'Homework (basic LMS) and its submissions' },
       { name: 'Transport', description: 'Vehicles, drivers, routes, pickup points, schedules, assignments' },
       { name: 'Assets', description: 'Categories, assets, allocations, maintenance' },

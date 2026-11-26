@@ -23,6 +23,7 @@ import {
 import { isForeignKeyViolation, isUniqueViolation } from '../../lib/pgErrors';
 import type { TenantContext } from '../../lib/tenant';
 import type { AuthUser } from '../../middleware/authenticate';
+import { resolveAcademicYearId } from '../academic-years/academicYears.service';
 import type {
   BulkMarkStaffAttendanceInput,
   BulkMarkStudentAttendanceInput,
@@ -531,12 +532,13 @@ export async function getCalendarEvent(tenant: TenantContext, id: bigint) {
 
 export async function createCalendarEvent(tenant: TenantContext, data: CreateCalendarEventInput) {
   if (data.classId != null) await assertClassInTenant(tenant.id, data.classId);
+  const academicYearId = data.academicYearId == null ? null : await resolveAcademicYearId(tenant, data.academicYearId);
   try {
     const [row] = await db
       .insert(academicCalendarEvents)
       .values({
         tenantId: tenant.id,
-        academicYearId: data.academicYearId ?? null,
+        academicYearId,
         branchId: data.branchId ?? null,
         title: data.title,
         description: data.description ?? null,
@@ -572,7 +574,9 @@ export async function updateCalendarEvent(tenant: TenantContext, id: bigint, dat
   if (endsAt < startsAt) throw new HttpError(400, 'endsAt must be on or after startsAt');
 
   const patch: Partial<typeof academicCalendarEvents.$inferInsert> = {};
-  if (data.academicYearId !== undefined) patch.academicYearId = data.academicYearId;
+  if (data.academicYearId !== undefined) {
+    patch.academicYearId = data.academicYearId === null ? null : await resolveAcademicYearId(tenant, data.academicYearId);
+  }
   if (data.branchId !== undefined) patch.branchId = data.branchId;
   if (data.title !== undefined) patch.title = data.title;
   if (data.description !== undefined) patch.description = data.description;
@@ -766,10 +770,10 @@ export async function createLeaveRequest(tenant: TenantContext, user: AuthUser, 
       .where(and(eq(leaveTypes.id, data.leaveTypeId), eq(leaveTypes.tenantId, tenant.id)))
       .limit(1);
     if (!lt || !lt.isActive) throw new HttpError(400, 'Leave type not found or inactive');
-    if (isStudent && lt.applicableTo === 'staff') {
+    if (isStudent && !['student', 'both'].includes(lt.applicableTo)) {
       throw new HttpError(400, 'This leave type is only applicable to staff');
     }
-    if (!isStudent && lt.applicableTo === 'student') {
+    if (!isStudent && !['staff', 'both', 'teaching', 'non_teaching'].includes(lt.applicableTo)) {
       throw new HttpError(400, 'This leave type is only applicable to students');
     }
     if (lt.requiresDocument && data.documentFileId == null) {
@@ -850,6 +854,8 @@ export async function decideLeaveRequest(
   id: bigint,
   data: DecideLeaveRequestInput,
 ) {
+  const academicYearId =
+    data.academicYearId === undefined ? undefined : await resolveAcademicYearId(tenant, data.academicYearId);
   return db.transaction(async (tx) => {
     const [existing] = await tx
       .select()
@@ -867,8 +873,8 @@ export async function decideLeaveRequest(
         eq(leaveBalances.staffId, existing.staffId),
         eq(leaveBalances.leaveTypeId, existing.leaveTypeId),
       ];
-      if (data.academicYearId !== undefined) {
-        balConditions.push(eq(leaveBalances.academicYearId, data.academicYearId));
+      if (academicYearId !== undefined) {
+        balConditions.push(eq(leaveBalances.academicYearId, academicYearId));
       }
       const balances = await tx.select().from(leaveBalances).where(and(...balConditions)).limit(2);
       if (balances.length === 1) {
@@ -973,6 +979,7 @@ export async function getLeaveBalance(tenant: TenantContext, id: bigint) {
 
 export async function upsertLeaveBalance(tenant: TenantContext, data: UpsertLeaveBalanceInput) {
   await assertStaffInTenant(tenant.id, data.staffId);
+  const academicYearId = await resolveAcademicYearId(tenant, data.academicYearId);
   const [lt] = await db
     .select({ id: leaveTypes.id })
     .from(leaveTypes)
@@ -988,7 +995,7 @@ export async function upsertLeaveBalance(tenant: TenantContext, data: UpsertLeav
         eq(leaveBalances.tenantId, tenant.id),
         eq(leaveBalances.staffId, data.staffId),
         eq(leaveBalances.leaveTypeId, data.leaveTypeId),
-        eq(leaveBalances.academicYearId, data.academicYearId),
+        eq(leaveBalances.academicYearId, academicYearId),
       ),
     )
     .limit(1);
@@ -1013,7 +1020,7 @@ export async function upsertLeaveBalance(tenant: TenantContext, data: UpsertLeav
         tenantId: tenant.id,
         staffId: data.staffId,
         leaveTypeId: data.leaveTypeId,
-        academicYearId: data.academicYearId,
+        academicYearId,
         allocated: data.allocated.toFixed(1),
         used: data.used.toFixed(1),
         carriedForward: data.carriedForward.toFixed(1),
