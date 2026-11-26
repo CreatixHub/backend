@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, getTableColumns, gte, inArray, isNull, lte, or } from 'drizzle-orm';
+import { and, asc, desc, eq, getTableColumns, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { db } from '../../db';
 import {
   classes,
@@ -12,10 +12,10 @@ import {
   timetableEntries,
 } from '../../db/schema';
 import { HttpError } from '../../lib/errors';
+import { schoolToday } from '../../lib/schoolDate';
 import type { TenantContext } from '../../lib/tenant';
 import type { AuthUser } from '../../middleware/authenticate';
-
-const todayStr = () => new Date().toISOString().slice(0, 10);
+import { resolveAcademicYearId } from '../academic-years/academicYears.service';
 
 // The staff row that belongs to the signed-in login. The "me" functions below are scoped to it.
 async function myStaffId(tenant: TenantContext, actor: AuthUser): Promise<bigint> {
@@ -43,16 +43,19 @@ async function assertStaff(tenant: TenantContext, id: bigint): Promise<bigint> {
 
 // Weekly timetable, Monday first. Only entries that are active today.
 async function timetableFor(tenant: TenantContext, teacherId: bigint) {
-  const today = todayStr();
+  const [today, yearId] = await Promise.all([schoolToday(tenant), resolveAcademicYearId(tenant)]);
 
-  return db
+  const rows = await db
     .select({
       id: timetableEntries.id,
       dayOfWeek: timetableEntries.dayOfWeek,
       sectionId: timetableEntries.sectionId,
       sectionName: sections.name,
       className: classes.name,
-      subject: getTableColumns(subjects),
+      subjectId: timetableEntries.subjectId,
+      title: timetableEntries.title,
+      source: timetableEntries.source,
+      subject: getTableColumns(subjects), // all null for a planner row that has no subject
       timeSlot: getTableColumns(timeSlots),
       classroomId: timetableEntries.classroomId,
       classroom: getTableColumns(classrooms),
@@ -60,7 +63,7 @@ async function timetableFor(tenant: TenantContext, teacherId: bigint) {
     .from(timetableEntries)
     .innerJoin(sections, eq(timetableEntries.sectionId, sections.id))
     .innerJoin(classes, eq(sections.classId, classes.id))
-    .innerJoin(subjects, eq(timetableEntries.subjectId, subjects.id))
+    .leftJoin(subjects, eq(timetableEntries.subjectId, subjects.id))
     .innerJoin(timeSlots, eq(timetableEntries.timeSlotId, timeSlots.id))
     .leftJoin(classrooms, eq(timetableEntries.classroomId, classrooms.id))
     .where(
@@ -68,15 +71,27 @@ async function timetableFor(tenant: TenantContext, teacherId: bigint) {
         eq(timetableEntries.tenantId, tenant.id),
         eq(timetableEntries.teacherId, teacherId),
         eq(timetableEntries.status, 'active'),
+        eq(timetableEntries.academicYearId, yearId),
+        eq(timeSlots.isActive, true),
+        sql`${timetableEntries.dayOfWeek} = ANY(${timeSlots.days})`,
         lte(timetableEntries.effectiveFrom, today),
         or(isNull(timetableEntries.effectiveTo), gte(timetableEntries.effectiveTo, today)),
       ),
     )
-    .orderBy(asc(timetableEntries.dayOfWeek), asc(timetableEntries.timeSlotId));
+    .orderBy(asc(timetableEntries.dayOfWeek), asc(timeSlots.startsAt), asc(timeSlots.sequence), asc(timetableEntries.id));
+
+  // no subject row (planner lesson with only a title): hand back the title as the subject's name so the page still has a label
+  return {
+    today,
+    rows: rows.map((r) => ({
+      ...r,
+      subject: r.subject ?? (r.title ? { name: r.title } : null),
+    })),
+  };
 }
 
 // "This teacher takes this subject in this section" (the mapping saved when a teacher is added).
-async function assignmentsFor(tenant: TenantContext, teacherId: bigint) {
+async function assignmentsFor(tenant: TenantContext, teacherId: bigint, academicYearId?: bigint) {
   return db
     .select({
       id: sectionTeachers.id,
@@ -91,7 +106,11 @@ async function assignmentsFor(tenant: TenantContext, teacherId: bigint) {
     .innerJoin(sections, eq(sectionTeachers.sectionId, sections.id))
     .innerJoin(classes, eq(sections.classId, classes.id))
     .innerJoin(subjects, eq(sectionTeachers.subjectId, subjects.id))
-    .where(and(eq(sectionTeachers.tenantId, tenant.id), eq(sectionTeachers.teacherId, teacherId)))
+    .where(and(
+      eq(sectionTeachers.tenantId, tenant.id),
+      eq(sectionTeachers.teacherId, teacherId),
+      academicYearId === undefined ? undefined : eq(sectionTeachers.academicYearId, academicYearId),
+    ))
     .orderBy(asc(classes.name), asc(sections.name), asc(subjects.name));
 }
 
@@ -133,7 +152,8 @@ export async function getMyTimetable(tenant: TenantContext, actor: AuthUser) {
 }
 
 export async function getMyAssignments(tenant: TenantContext, actor: AuthUser) {
-  return assignmentsFor(tenant, await myStaffId(tenant, actor));
+  const teacherId = await myStaffId(tenant, actor);
+  return assignmentsFor(tenant, teacherId, await resolveAcademicYearId(tenant));
 }
 
 // Homework this teacher has set, newest due date first.
@@ -172,6 +192,6 @@ export async function getStaffTimetable(tenant: TenantContext, id: bigint) {
   return timetableFor(tenant, await assertStaff(tenant, id));
 }
 
-export async function getStaffAssignments(tenant: TenantContext, id: bigint) {
-  return assignmentsFor(tenant, await assertStaff(tenant, id));
+export async function getStaffAssignments(tenant: TenantContext, id: bigint, academicYearId?: bigint) {
+  return assignmentsFor(tenant, await assertStaff(tenant, id), academicYearId);
 }

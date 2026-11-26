@@ -21,6 +21,14 @@ const nonEmpty = (v: object) => Object.keys(v).length > 0;
 // ---------------------------------------------------------------- time slots
 const timeSlotFields = {
   name: text(40), // "Period 1", "Lunch"
+  // which bell this slot belongs to, e.g. "usual" (the default) or "friday"; lower-cased because publish keys its slots that way
+  dayType: text(40).transform((v) => v.toLowerCase()).optional(),
+  // the weekdays this slot runs on (1 = Monday ... 7 = Sunday): at least one, no repeats; defaults to Mon-Sat
+  days: z
+    .array(dayOfWeek)
+    .min(1, 'Pick at least one day')
+    .refine((v) => new Set(v).size === v.length, 'Days must not repeat')
+    .optional(),
   sequence: z.number().int().min(1).max(30), // order within the day
   startsAt: clock,
   endsAt: clock,
@@ -29,7 +37,10 @@ const timeSlotFields = {
 };
 
 export const listTimeSlotsSchema = z
-  .object({ isActive: z.enum(['true', 'false']).transform((v) => v === 'true').optional() })
+  .object({
+    isActive: z.enum(['true', 'false']).transform((v) => v === 'true').optional(),
+    dayType: text(40).optional(), // only the slots of this bell
+  })
   .strict();
 
 export const createTimeSlotSchema = z
@@ -80,7 +91,7 @@ export const listEntriesSchema = z
     academicYearId: id.optional(),
     dayOfWeek: z.coerce.number().int().min(1).max(7).optional(),
     status: z.enum(ENTRY_STATUSES).optional(),
-    onDate: isoDate.optional(), // only entries that are in effect on this date
+    onDate: z.union([isoDate, z.literal('today')]).optional(), // 'today' uses the school's timezone
   })
   .strict();
 

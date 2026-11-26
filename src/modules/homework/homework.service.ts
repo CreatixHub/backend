@@ -5,6 +5,7 @@ import { HttpError } from '../../lib/errors';
 import { isRowScopedFor } from '../../lib/ownership';
 import type { TenantContext } from '../../lib/tenant';
 import type { AuthUser } from '../../middleware/authenticate';
+import { resolveAcademicYearId } from '../academic-years/academicYears.service';
 import type {
   CreateHomeworkInput,
   GradeSubmissionInput,
@@ -15,7 +16,7 @@ import type {
 } from './homework.schemas';
 
 // RULES (same as the other modules): every query has tenantId = tenant.id.
-// enrollments, files and academic_years do not exist yet, so enrollmentId / fileId / academicYearId are NOT checked.
+// enrollmentId / fileId are not checked here.
 
 const UNIQUE_VIOLATION = '23505';
 function isUniqueViolation(e: unknown): boolean {
@@ -198,6 +199,7 @@ export async function createHomework(
   }
   await assertTeacher(tenant.id, teacherId);
 
+  const academicYearId = await resolveAcademicYearId(tenant, input.academicYearId);
   const columns = toColumns(input);
   const year = input.assignedOn.slice(0, 4);
 
@@ -213,7 +215,7 @@ export async function createHomework(
           sectionId: input.sectionId,
           subjectId: input.subjectId,
           teacherId,
-          academicYearId: input.academicYearId,
+          academicYearId,
           title: input.title,
           assignedOn: input.assignedOn,
           dueAt: new Date(input.dueAt),

@@ -5,6 +5,7 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { config } from './config';
 import * as schema from './db/schema';
 import { PERMISSIONS, DEFAULT_ROLES } from './permissions';
+import { defaultYearFor } from './modules/academic-years/yearName';
 
 const pool = new Pool({ connectionString: config.DATABASE_URL });
 const db = drizzle(pool, { schema });
@@ -87,6 +88,9 @@ async function seedDemoAccount() {
       .values({ tenantId: org.id, userId: user.id })
       .returning({ id: schema.memberships.id });
     await tx.insert(schema.membershipRoles).values({ membershipId: membership.id, roleId: ownerRoleId, tenantId: org.id });
+
+    // the school's first academic year, current from day one (same as createOrganization)
+    await tx.insert(schema.academicYears).values({ tenantId: org.id, ...defaultYearFor(new Date()), isCurrent: true });
   });
 
   console.log(`Seeded demo account: ${DEMO_EMAIL} / ${DEMO_PASSWORD} (school: ${DEMO_SCHOOL_SLUG})`);

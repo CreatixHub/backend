@@ -4,6 +4,7 @@ import { and, asc, desc, eq, gte, inArray, isNull, lte, ne, sql } from 'drizzle-
 import { db } from '../../db';
 import {
   academicCalendarEvents,
+  academicYears,
   attendanceRules,
   leaveBalances,
   leaveRequests,
@@ -20,6 +21,7 @@ import { decideLeaveRequest } from '../attendance/attendance.service';
 import { admissions, classTeachers, classes, students } from '../../db/schema';
 import { isNotNull } from 'drizzle-orm';
 import { resolveStudentScope } from '../../lib/ownership';
+import { resolveAcademicYearId } from '../academic-years/academicYears.service';
 
 export const leaveRouter = Router();
 
@@ -58,12 +60,14 @@ async function myStaff(tenant: TenantContext, user: AuthUser) {
   return row;
 }
 
+// the school's current academic year (null only if the school has none set up)
 async function currentYearId(tenant: TenantContext): Promise<bigint | null> {
   const [r] = await db
-    .select({ y: sql<string | null>`max(${leaveBalances.academicYearId})` })
-    .from(leaveBalances)
-    .where(eq(leaveBalances.tenantId, tenant.id));
-  return r?.y == null ? null : BigInt(r.y);
+    .select({ id: academicYears.id })
+    .from(academicYears)
+    .where(and(eq(academicYears.tenantId, tenant.id), eq(academicYears.isCurrent, true)))
+    .limit(1);
+  return r?.id ?? null;
 }
 
 async function yearForStaff(tenant: TenantContext, staffId: bigint): Promise<bigint | null> {
@@ -75,7 +79,7 @@ async function yearForStaff(tenant: TenantContext, staffId: bigint): Promise<big
 }
 // every staff member (teaching or not) gets this year's balance for each quota leave type the first time they use leave
 async function ensureBalances(tenant: TenantContext, staffId: bigint, staffType: string | null) {
-  const year = (await yearForStaff(tenant, staffId)) ?? BigInt(new Date().getFullYear());
+  const year = (await yearForStaff(tenant, staffId)) ?? (await resolveAcademicYearId(tenant));
   const types = await db
     .select({ id: leaveTypes.id, quota: leaveTypes.annualQuota, applicableTo: leaveTypes.applicableTo })
     .from(leaveTypes)
@@ -479,7 +483,7 @@ leaveRouter.post('/allocate', async (req, res) => {
   const tenant = currentTenant(req);
   if (!isAdmin(tenant)) throw new HttpError(403, 'Only the admin can allocate leave balances');
   const body = z.object({ academicYearId: z.coerce.bigint().positive().optional() }).strict().parse(req.body ?? {});
-  const year = body.academicYearId ?? (await currentYearId(tenant)) ?? BigInt(new Date().getFullYear());
+  const year = await resolveAcademicYearId(tenant, body.academicYearId); // 404 for another school's year, else the current year
 
   const types = await db
     .select()

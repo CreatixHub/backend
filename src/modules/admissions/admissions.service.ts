@@ -20,6 +20,7 @@ import { HttpError } from '../../lib/errors';
 import { isForeignKeyViolation, isUniqueViolation } from '../../lib/pgErrors';
 import type { TenantContext } from '../../lib/tenant';
 import type { AuthUser } from '../../middleware/authenticate';
+import { resolveAcademicYearId } from '../academic-years/academicYears.service';
 import type {
   AcceptAdmissionInput,
   ChangeAdmissionStatusInput,
@@ -276,6 +277,7 @@ export async function getAdmissionHistory(tenant: TenantContext, id: bigint) {
 }
 
 export async function createAdmission(tenant: TenantContext, actor: AuthUser, input: CreateAdmissionInput) {
+  const academicYearId = await resolveAcademicYearId(tenant, input.academicYearId);
   await assertClass(tenant.id, input.classId);
   if (input.assignedToStaffId) await assertStaff(tenant.id, input.assignedToStaffId);
   if (input.photoFileId) await assertPhotoFile(tenant.id, input.photoFileId);
@@ -301,7 +303,7 @@ export async function createAdmission(tenant: TenantContext, actor: AuthUser, in
                 ...columns,
                 tenantId: tenant.id,
                 applicationNo,
-                academicYearId: input.academicYearId,
+                academicYearId,
                 classId: input.classId,
                 firstName: input.firstName,
                 lastName: input.lastName,
@@ -360,10 +362,15 @@ export async function updateAdmission(
     throw new HttpError(400, 'Validation failed', [{ field: 'feePaid', message: 'Must be true when feePaidOn is set' }]);
   }
 
+  const patch = toColumns(input);
+  if (input.academicYearId !== undefined) {
+    patch.academicYearId = await resolveAcademicYearId(tenant, input.academicYearId);
+  }
+
   try {
     const [row] = await db
       .update(admissions)
-      .set(toColumns(input))
+      .set(patch)
       .where(and(eq(admissions.id, id), eq(admissions.tenantId, tenant.id), isNull(admissions.deletedAt)))
       .returning();
     return toAdmission(row);

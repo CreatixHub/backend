@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { signupAndLogin, uniqueSlug } from "./helpers";
+import { currentAcademicYearId, signupAndLogin, uniqueSlug } from "./helpers";
 
 async function setupSchool(tag: string) {
   const ctx = await signupAndLogin(tag);
@@ -7,7 +7,8 @@ async function setupSchool(tag: string) {
   const orgRes = await ctx.agent.post("/api/organizations").send({ name: `${tag} School`, slug });
   expect(orgRes.status).toBe(201);
   await ctx.switchOrganization(slug);
-  return { ...ctx, slug };
+  const yearId = await currentAcademicYearId(ctx.agent);
+  return { ...ctx, slug, yearId };
 }
 
 describe("Task 2 — Fees & Expenses", () => {
@@ -65,7 +66,7 @@ describe("Task 2 — Fees & Expenses", () => {
 
     // 3. Fee Structure with items & installments
     const fsRes = await schoolA.agent.post("/api/fee-structures").send({
-      academicYearId: "1",
+      academicYearId: schoolA.yearId,
       classId,
       name: "Grade 10 Annual Plan",
       code: "G10-ANN",
@@ -95,7 +96,7 @@ describe("Task 2 — Fees & Expenses", () => {
     const genInv = await schoolA.agent.post("/api/invoices/generate-from-structure").send({
       studentId,
       enrollmentId: "8001",
-      academicYearId: "1",
+      academicYearId: schoolA.yearId,
       feeStructureId,
       installmentId,
       issuedOn: "2026-06-20",

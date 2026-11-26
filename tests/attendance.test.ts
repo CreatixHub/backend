@@ -1,6 +1,6 @@
 import request from "supertest";
 import { describe, expect, it } from "vitest";
-import { app, signupAndLogin, uniqueSlug } from "./helpers";
+import { app, currentAcademicYearId, signupAndLogin, uniqueSlug } from "./helpers";
 
 const putWith = (token: string, url: string) => request(app).put(url).set("Authorization", `Bearer ${token}`);
 
@@ -10,7 +10,8 @@ async function setupSchool(tag: string) {
   const orgRes = await ctx.agent.post("/api/organizations").send({ name: `${tag} School`, slug });
   expect(orgRes.status).toBe(201);
   await ctx.switchOrganization(slug);
-  return { ...ctx, slug, orgId: orgRes.body.data.id as string };
+  const yearId = await currentAcademicYearId(ctx.agent);
+  return { ...ctx, slug, orgId: orgRes.body.data.id as string, yearId };
 }
 
 describe("Task 1 — Attendance, Holidays & Leaves", () => {
@@ -158,7 +159,7 @@ describe("Task 1 — Attendance, Holidays & Leaves", () => {
     const balRes = await putWith(schoolA.agent.accessToken, "/api/leave-balances").send({
       staffId,
       leaveTypeId,
-      academicYearId: "1",
+      academicYearId: schoolA.yearId,
       allocated: 10,
       used: 0,
       carriedForward: 2,

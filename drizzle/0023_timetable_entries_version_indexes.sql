@@ -1,0 +1,2 @@
+CREATE INDEX "timetable_entries_version_id_idx" ON "timetable_entries" USING btree ("version_id");--> statement-breakpoint
+CREATE INDEX "timetable_entries_archived_by_version_id_idx" ON "timetable_entries" USING btree ("archived_by_version_id");

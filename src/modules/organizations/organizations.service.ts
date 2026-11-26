@@ -1,6 +1,7 @@
 import { and, eq, isNull } from 'drizzle-orm';
 import { db } from '../../db';
-import { memberships, membershipRoles, organizations, permissions, rolePermissions, roles } from '../../db/schema';
+import { academicYears, memberships, membershipRoles, organizations, permissions, rolePermissions, roles } from '../../db/schema';
+import { defaultYearFor } from '../academic-years/yearName';
 import { HttpError } from '../../lib/errors';
 import type { TenantContext } from '../../lib/tenant';
 import type { AuthUser } from '../../middleware/authenticate';
@@ -57,6 +58,10 @@ export async function createOrganization(input: CreateOrganizationInput, user: A
         .values({ tenantId: org.id, userId: user.id })
         .returning({ id: memberships.id });
       await tx.insert(membershipRoles).values({ membershipId: membership.id, roleId: ownerRoleId, tenantId: org.id });
+
+      // 4. the school's first academic year, current from day one (name and dates: see defaultYearFor)
+      const firstYear = defaultYearFor(new Date());
+      await tx.insert(academicYears).values({ tenantId: org.id, ...firstYear, isCurrent: true });
 
       return org;
     });

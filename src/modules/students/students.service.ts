@@ -18,10 +18,12 @@ import {
   users,
 } from '../../db/schema';
 import { HttpError } from '../../lib/errors';
+import { schoolToday } from '../../lib/schoolDate';
 import { assertStudentReadable, resolveStudentScope, studentScopeCondition } from '../../lib/ownership';
 import { isForeignKeyViolation, isUniqueViolation } from '../../lib/pgErrors';
 import type { TenantContext } from '../../lib/tenant';
 import type { AuthUser } from '../../middleware/authenticate';
+import { resolveAcademicYearId } from '../academic-years/academicYears.service';
 import type {
   CreateGuardianInput,
   CreateStudentDocumentInput,
@@ -594,7 +596,7 @@ export async function getMyTimetable(tenant: TenantContext, actor: AuthUser) {
   if (classSections.length > 1) return empty('Your section has not been assigned yet. Please contact the school office.');
 
   const section = classSections[0];
-  const today = todayStr();
+  const [today, yearId] = await Promise.all([schoolToday(tenant), resolveAcademicYearId(tenant)]);
 
   const [slots, entries] = await Promise.all([
     db
@@ -602,13 +604,15 @@ export async function getMyTimetable(tenant: TenantContext, actor: AuthUser) {
         id: timeSlots.id,
         name: timeSlots.name,
         sequence: timeSlots.sequence,
+        dayType: timeSlots.dayType,
+        days: timeSlots.days,
         startsAt: timeSlots.startsAt,
         endsAt: timeSlots.endsAt,
         isBreak: timeSlots.isBreak,
       })
       .from(timeSlots)
       .where(and(eq(timeSlots.tenantId, tenant.id), eq(timeSlots.isActive, true)))
-      .orderBy(asc(timeSlots.sequence)),
+      .orderBy(asc(timeSlots.sequence), asc(timeSlots.dayType)),
     db
       .select({
         id: timetableEntries.id,
@@ -618,15 +622,18 @@ export async function getMyTimetable(tenant: TenantContext, actor: AuthUser) {
         slotSequence: timeSlots.sequence,
         startsAt: timeSlots.startsAt,
         endsAt: timeSlots.endsAt,
-        subjectName: subjects.name,
+        // planner rows may have no subject or teacher: the title stands in for the subject name
+        subjectName: sql<string | null>`coalesce(${subjects.name}, ${timetableEntries.title})`,
+        title: timetableEntries.title,
+        source: timetableEntries.source,
         subjectCode: subjects.code,
         subjectColor: subjects.color,
         teacherName: staff.fullName,
         classroomCode: classrooms.code,
       })
       .from(timetableEntries)
-      .innerJoin(subjects, eq(timetableEntries.subjectId, subjects.id))
-      .innerJoin(staff, eq(timetableEntries.teacherId, staff.id))
+      .leftJoin(subjects, eq(timetableEntries.subjectId, subjects.id))
+      .leftJoin(staff, eq(timetableEntries.teacherId, staff.id))
       .innerJoin(timeSlots, eq(timetableEntries.timeSlotId, timeSlots.id))
       .leftJoin(classrooms, eq(timetableEntries.classroomId, classrooms.id))
       .where(
@@ -634,6 +641,9 @@ export async function getMyTimetable(tenant: TenantContext, actor: AuthUser) {
           eq(timetableEntries.tenantId, tenant.id),
           eq(timetableEntries.sectionId, section.id),
           eq(timetableEntries.status, 'active'),
+          eq(timetableEntries.academicYearId, yearId),
+          eq(timeSlots.isActive, true),
+          sql`${timetableEntries.dayOfWeek} = ANY(${timeSlots.days})`,
           lte(timetableEntries.effectiveFrom, today),
           or(isNull(timetableEntries.effectiveTo), gte(timetableEntries.effectiveTo, today)),
         ),
@@ -647,6 +657,7 @@ export async function getMyTimetable(tenant: TenantContext, actor: AuthUser) {
     sectionId: section.id,
     sectionName: section.name,
     message: '',
+    today,
     slots,
     entries,
   };

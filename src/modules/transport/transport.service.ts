@@ -13,6 +13,7 @@ import { HttpError } from '../../lib/errors';
 import { resolveStudentScope, studentScopeCondition } from '../../lib/ownership';
 import type { TenantContext } from '../../lib/tenant';
 import type { AuthUser } from '../../middleware/authenticate';
+import { resolveAcademicYearId } from '../academic-years/academicYears.service';
 import type {
   CreateAssignmentInput,
   CreateDriverInput,
@@ -761,8 +762,9 @@ export async function createAssignment(
   if (staffId !== null) await assertStaff(tenant.id, staffId, true);
   // studentId is not checked yet: the students table does not exist
 
+  const academicYearId = await resolveAcademicYearId(tenant, input.academicYearId);
   const direction = input.direction ?? 'both';
-  await assertNoDuplicate(tenant.id, { studentId, staffId }, input.academicYearId, direction);
+  await assertNoDuplicate(tenant.id, { studentId, staffId }, academicYearId, direction);
 
   const [row] = await db
     .insert(transportAssignments)
@@ -770,7 +772,7 @@ export async function createAssignment(
       tenantId: tenant.id,
       studentId,
       staffId,
-      academicYearId: input.academicYearId,
+      academicYearId,
       routeId: route.id,
       pickupPointId: point.id,
       direction,

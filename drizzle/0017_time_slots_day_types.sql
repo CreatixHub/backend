@@ -1,0 +1,6 @@
+DROP INDEX "time_slots_tenant_id_sequence_key";--> statement-breakpoint
+ALTER TABLE "time_slots" ADD COLUMN "day_type" text DEFAULT 'usual' NOT NULL;--> statement-breakpoint
+ALTER TABLE "time_slots" ADD COLUMN "days" smallint[] DEFAULT '{1,2,3,4,5,6}'::smallint[] NOT NULL;--> statement-breakpoint
+-- Existing slots start with days {1..6}. Readers filter on day_of_week = ANY(days), so a legacy entry on a weekday outside that set (e.g. Sunday = 7) would vanish from every view. Widen each such slot's days to include every weekday its entries already use.
+UPDATE "time_slots" ts SET "days" = (SELECT array_agg(DISTINCT x.d ORDER BY x.d) FROM (SELECT unnest(ts."days") AS d UNION SELECT te."day_of_week" AS d FROM "timetable_entries" te WHERE te."time_slot_id" = ts."id") x) WHERE EXISTS (SELECT 1 FROM "timetable_entries" te WHERE te."time_slot_id" = ts."id" AND NOT (te."day_of_week" = ANY(ts."days")));--> statement-breakpoint
+CREATE UNIQUE INDEX "time_slots_tenant_id_day_type_sequence_key" ON "time_slots" USING btree ("tenant_id","day_type","sequence");

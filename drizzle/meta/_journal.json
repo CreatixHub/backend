@@ -113,6 +113,62 @@
       "when": 1795250190545,
       "tag": "0015_class_notes",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1795516667375,
+      "tag": "0016_staff_teaching_profile",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1795517028780,
+      "tag": "0017_time_slots_day_types",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1795517317311,
+      "tag": "0018_timetable_entries_planner",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1795517939723,
+      "tag": "0019_academic_years",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1795583134611,
+      "tag": "0020_planner_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1795583908841,
+      "tag": "0021_timetable_versions",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1795589470911,
+      "tag": "0022_drop_planner_teacher_slot_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1795607971577,
+      "tag": "0023_timetable_entries_version_indexes",
+      "breakpoints": true
     }
   ]
 }

@@ -1,4 +1,4 @@
-import { and, asc, count, eq, gt, gte, isNull, lt, lte, ne, or } from 'drizzle-orm';
+import { and, asc, count, eq, gte, inArray, isNull, lte, ne, or, sql } from 'drizzle-orm';
 import { db } from '../../db';
 import {
   classes,
@@ -12,8 +12,10 @@ import {
   timetableEntries,
 } from '../../db/schema';
 import { HttpError } from '../../lib/errors';
+import { schoolToday } from '../../lib/schoolDate';
 import type { TenantContext } from '../../lib/tenant';
 import type { AuthUser } from '../../middleware/authenticate';
+import { resolveAcademicYearId } from '../academic-years/academicYears.service';
 import type {
   CreateEntryInput,
   CreateSectionTeacherInput,
@@ -25,6 +27,7 @@ import type {
   UpdateSectionTeacherInput,
   UpdateTimeSlotInput,
 } from './timetable.schemas';
+import { DEFAULT_DAY_TYPE, DEFAULT_DAYS, slotsConflict, toMinutes } from './slotOverlap';
 
 // RULES (same as the other modules): every query has tenantId = tenant.id.
 
@@ -44,12 +47,6 @@ interface Page {
   meta: { page: number; limit: number; total: number; pages: number };
 }
 const pageMeta = (page: number, limit: number, total: number) => ({ page, limit, total, pages: Math.ceil(total / limit) });
-
-// "08:30" or "08:30:00" -> minutes since midnight
-const toMinutes = (t: string) => {
-  const [h, m] = t.split(':');
-  return Number(h) * 60 + Number(m);
-};
 
 // ---------------------------------------------------------------- shared checks
 async function loadSection(tenantId: bigint, id: bigint) {
@@ -125,20 +122,19 @@ async function loadTimeSlot(tenantId: bigint, id: bigint) {
   return row;
 }
 
-// Two periods of the same day cannot overlap in time.
-async function assertNoSlotOverlap(tenantId: bigint, startsAt: string, endsAt: string, selfId?: bigint) {
-  const [clash] = await db
-    .select({ name: timeSlots.name })
+// Two periods that share a weekday cannot overlap in time (a Friday-only bell may overlap a Mon-Thu bell).
+// The decision itself lives in the pure slotsConflict(); a school has only a few dozen slots, so we load them
+// (this tenant only) and ask that one function instead of repeating the rule in SQL.
+async function assertNoSlotOverlap(
+  tenantId: bigint,
+  window: { startsAt: string; endsAt: string; days: readonly number[] },
+  selfId?: bigint,
+) {
+  const others = await db
+    .select({ name: timeSlots.name, startsAt: timeSlots.startsAt, endsAt: timeSlots.endsAt, days: timeSlots.days })
     .from(timeSlots)
-    .where(
-      and(
-        eq(timeSlots.tenantId, tenantId),
-        lt(timeSlots.startsAt, endsAt),
-        gt(timeSlots.endsAt, startsAt),
-        selfId === undefined ? undefined : ne(timeSlots.id, selfId),
-      ),
-    )
-    .limit(1);
+    .where(and(eq(timeSlots.tenantId, tenantId), selfId === undefined ? undefined : ne(timeSlots.id, selfId)));
+  const clash = others.find((other) => slotsConflict(window, other));
   if (clash) throw new HttpError(409, `These times overlap with "${clash.name}"`);
 }
 
@@ -156,26 +152,64 @@ async function countEntriesUsingSlot(tenantId: bigint, timeSlotId: bigint, activ
   return total;
 }
 
+// 1 = Monday ... 7 = Sunday (same numbering as timetable_entries.day_of_week and time_slots.days)
+const WEEKDAY_NAMES: Record<number, string> = {
+  1: 'Monday',
+  2: 'Tuesday',
+  3: 'Wednesday',
+  4: 'Thursday',
+  5: 'Friday',
+  6: 'Saturday',
+  7: 'Sunday',
+};
+
+// Active lessons of this slot (any academic year) that fall on one of these weekdays.
+async function countActiveEntriesOnDays(tenantId: bigint, timeSlotId: bigint, days: number[]): Promise<number> {
+  const [{ total }] = await db
+    .select({ total: count() })
+    .from(timetableEntries)
+    .where(
+      and(
+        eq(timetableEntries.tenantId, tenantId),
+        eq(timetableEntries.timeSlotId, timeSlotId),
+        eq(timetableEntries.status, 'active'),
+        inArray(timetableEntries.dayOfWeek, days),
+      ),
+    );
+  return total;
+}
+
 export async function listTimeSlots(tenant: TenantContext, q: ListTimeSlotsInput): Promise<unknown> {
   const rows = await db
     .select()
     .from(timeSlots)
-    .where(and(eq(timeSlots.tenantId, tenant.id), q.isActive === undefined ? undefined : eq(timeSlots.isActive, q.isActive)))
-    .orderBy(asc(timeSlots.sequence));
+    .where(
+      and(
+        eq(timeSlots.tenantId, tenant.id),
+        q.isActive === undefined ? undefined : eq(timeSlots.isActive, q.isActive),
+        q.dayType === undefined ? undefined : eq(timeSlots.dayType, q.dayType),
+      ),
+    )
+    .orderBy(asc(timeSlots.sequence), asc(timeSlots.dayType), asc(timeSlots.id));
   return rows.map(toRow);
 }
+
+const sortedDays = (days: readonly number[]) => [...days].sort((a, b) => a - b);
 
 export async function createTimeSlot(
   tenant: TenantContext,
   _actor: AuthUser,
   input: CreateTimeSlotInput,
 ): Promise<unknown> {
-  await assertNoSlotOverlap(tenant.id, input.startsAt, input.endsAt);
+  const days = sortedDays(input.days ?? DEFAULT_DAYS);
+  await assertNoSlotOverlap(tenant.id, { startsAt: input.startsAt, endsAt: input.endsAt, days });
   try {
     const [row] = await db
       .insert(timeSlots)
       .values({
         ...input,
+        dayType: input.dayType ?? DEFAULT_DAY_TYPE,
+        days,
         tenantId: tenant.id,
         durationMinutes: toMinutes(input.endsAt) - toMinutes(input.startsAt),
       })
@@ -199,7 +233,9 @@ export async function updateTimeSlot(
   if (toMinutes(endsAt) <= toMinutes(startsAt)) {
     throw new HttpError(400, 'Validation failed', [{ field: 'endsAt', message: 'Must be after startsAt' }]);
   }
-  await assertNoSlotOverlap(tenant.id, startsAt, endsAt, id);
+  const days = input.days === undefined ? existing.days : sortedDays(input.days);
+  // overlap is checked against the NEW times and days; a changed dayType/sequence is checked by the unique index below
+  await assertNoSlotOverlap(tenant.id, { startsAt, endsAt, days }, id);
 
   // turning a slot into a break (or switching it off) is not allowed while lessons use it
   if (input.isBreak === true || input.isActive === false) {
@@ -208,10 +244,20 @@ export async function updateTimeSlot(
     }
   }
 
+  // dropping a weekday from the slot is not allowed while active lessons (any academic year) still run on it:
+  // they would silently vanish from every timetable view and could not be marked in period attendance
+  if (input.days !== undefined) {
+    const removed = existing.days.filter((day) => !days.includes(day));
+    if (removed.length > 0 && (await countActiveEntriesOnDays(tenant.id, id, removed)) > 0) {
+      const names = removed.map((day) => WEEKDAY_NAMES[day] ?? `day ${day}`).join(', ');
+      throw new HttpError(409, `Remove or move the lessons on ${names} that use this time slot first`);
+    }
+  }
+
   try {
     const [row] = await db
       .update(timeSlots)
-      .set({ ...input, durationMinutes: toMinutes(endsAt) - toMinutes(startsAt) })
+      .set({ ...input, ...(input.days === undefined ? {} : { days }), durationMinutes: toMinutes(endsAt) - toMinutes(startsAt) })
       .where(and(eq(timeSlots.id, id), eq(timeSlots.tenantId, tenant.id)))
       .returning();
     return toRow(row);
@@ -287,10 +333,11 @@ export async function createSectionTeacher(
   const section = await loadSection(tenant.id, input.sectionId);
   await assertSubjectTaughtInClass(tenant.id, section.classId, input.subjectId);
   await assertTeacher(tenant.id, input.teacherId);
+  const academicYearId = await resolveAcademicYearId(tenant, input.academicYearId);
   try {
     const [row] = await db
       .insert(sectionTeachers)
-      .values({ ...input, tenantId: tenant.id })
+      .values({ ...input, tenantId: tenant.id, academicYearId })
       .returning();
     return toRow(row);
   } catch (e) {
@@ -340,6 +387,7 @@ async function assertNoClash(tenantId: bigint, e: EntryShape, selfId?: bigint) {
       sectionId: timetableEntries.sectionId,
       teacherId: timetableEntries.teacherId,
       classroomId: timetableEntries.classroomId,
+      classroomIds: timetableEntries.classroomIds,
     })
     .from(timetableEntries)
     .where(
@@ -355,7 +403,13 @@ async function assertNoClash(tenantId: bigint, e: EntryShape, selfId?: bigint) {
         or(
           eq(timetableEntries.sectionId, e.sectionId),
           eq(timetableEntries.teacherId, e.teacherId),
-          e.classroomId ? eq(timetableEntries.classroomId, e.classroomId) : undefined,
+          // a planner lesson can use several rooms: classroomId is only the first, classroomIds holds all of them
+          e.classroomId
+            ? or(
+                eq(timetableEntries.classroomId, e.classroomId),
+                sql`${e.classroomId} = ANY(${timetableEntries.classroomIds})`,
+              )
+            : undefined,
         ),
       ),
     );
@@ -366,7 +420,8 @@ async function assertNoClash(tenantId: bigint, e: EntryShape, selfId?: bigint) {
   if (clashes.some((c) => c.teacherId === e.teacherId)) {
     throw new HttpError(409, 'This teacher is already teaching another class in that period');
   }
-  if (e.classroomId && clashes.some((c) => c.classroomId === e.classroomId)) {
+  const room = e.classroomId;
+  if (room && clashes.some((c) => c.classroomId === room || c.classroomIds.includes(room))) {
     throw new HttpError(409, 'This classroom is already in use in that period');
   }
 }
@@ -389,6 +444,10 @@ async function validateEntry(tenantId: bigint, e: EntryShape, selfId?: bigint): 
   if (!slot) throw new HttpError(400, 'Time slot not found in this school');
   if (slot.isBreak) throw new HttpError(400, 'A lesson cannot be scheduled in a break');
   if (!slot.isActive) throw new HttpError(400, 'That time slot is not active');
+  // an active lesson only makes sense on a weekday the slot actually runs (a Friday bell has no Monday period)
+  if (e.status === 'active' && !slot.days.includes(e.dayOfWeek)) {
+    throw new HttpError(400, 'That time slot does not run on this day');
+  }
 
   await assertSubjectTaughtInClass(tenantId, section.classId, e.subjectId);
   await assertTeacher(tenantId, e.teacherId);
@@ -397,7 +456,9 @@ async function validateEntry(tenantId: bigint, e: EntryShape, selfId?: bigint): 
   if (e.status === 'active') await assertNoClash(tenantId, e, selfId);
 }
 
-export async function listEntries(tenant: TenantContext, q: ListEntriesInput): Promise<Page> {
+export async function listEntries(tenant: TenantContext, q: ListEntriesInput) {
+  const today = q.onDate === 'today' ? await schoolToday(tenant) : undefined;
+  const onDate = today ?? q.onDate;
   const where = and(
     eq(timetableEntries.tenantId, tenant.id),
     q.sectionId ? eq(timetableEntries.sectionId, q.sectionId) : undefined,
@@ -407,15 +468,34 @@ export async function listEntries(tenant: TenantContext, q: ListEntriesInput): P
     q.academicYearId ? eq(timetableEntries.academicYearId, q.academicYearId) : undefined,
     q.dayOfWeek ? eq(timetableEntries.dayOfWeek, q.dayOfWeek) : undefined,
     q.status ? eq(timetableEntries.status, q.status) : undefined,
-    q.onDate
+    onDate
       ? and(
-          lte(timetableEntries.effectiveFrom, q.onDate),
-          or(isNull(timetableEntries.effectiveTo), gte(timetableEntries.effectiveTo, q.onDate)),
+          lte(timetableEntries.effectiveFrom, onDate),
+          or(isNull(timetableEntries.effectiveTo), gte(timetableEntries.effectiveTo, onDate)),
         )
       : undefined,
   );
+  const visibleSlot = onDate
+    ? and(eq(timeSlots.isActive, true), sql`${timetableEntries.dayOfWeek} = ANY(${timeSlots.days})`)
+    : undefined;
+  const sectionId = q.sectionId;
+  const isPlannerManaged = today && sectionId && q.academicYearId
+    ? db
+        .select({ id: timetableEntries.id })
+        .from(timetableEntries)
+        .where(and(
+          eq(timetableEntries.tenantId, tenant.id),
+          eq(timetableEntries.sectionId, sectionId),
+          eq(timetableEntries.academicYearId, q.academicYearId),
+          eq(timetableEntries.status, 'active'),
+          eq(timetableEntries.source, 'planner'),
+          or(isNull(timetableEntries.effectiveTo), gte(timetableEntries.effectiveTo, today)),
+        ))
+        .limit(1)
+        .then((entries) => entries.length > 0)
+    : undefined;
 
-  const [rows, [{ total }]] = await Promise.all([
+  const [rows, [{ total }], plannerManaged] = await Promise.all([
     db
       .select({
         id: timetableEntries.id,
@@ -424,7 +504,10 @@ export async function listEntries(tenant: TenantContext, q: ListEntriesInput): P
         className: classes.name,
         subjectId: timetableEntries.subjectId,
         subjectCode: subjects.code,
-        subjectName: subjects.name,
+        // planner rows may have no subject: show their title in its place
+        subjectName: sql<string | null>`coalesce(${subjects.name}, ${timetableEntries.title})`,
+        title: timetableEntries.title,
+        source: timetableEntries.source,
         subjectColor: subjects.color,
         teacherId: timetableEntries.teacherId,
         teacherName: staff.fullName,
@@ -435,6 +518,13 @@ export async function listEntries(tenant: TenantContext, q: ListEntriesInput): P
         endsAt: timeSlots.endsAt,
         classroomId: timetableEntries.classroomId,
         classroomCode: classrooms.code,
+        classroomIds: timetableEntries.classroomIds,
+        classroomCodes: sql<string[]>`ARRAY(
+          SELECT ${classrooms.code} FROM ${classrooms}
+          WHERE ${classrooms.tenantId} = ${timetableEntries.tenantId}
+            AND ${classrooms.id} = ANY(${timetableEntries.classroomIds})
+          ORDER BY ${classrooms.code}
+        )`,
         dayOfWeek: timetableEntries.dayOfWeek,
         academicYearId: timetableEntries.academicYearId,
         effectiveFrom: timetableEntries.effectiveFrom,
@@ -444,18 +534,21 @@ export async function listEntries(tenant: TenantContext, q: ListEntriesInput): P
       .from(timetableEntries)
       .innerJoin(sections, eq(timetableEntries.sectionId, sections.id))
       .innerJoin(classes, eq(sections.classId, classes.id))
-      .innerJoin(subjects, eq(timetableEntries.subjectId, subjects.id))
-      .innerJoin(staff, eq(timetableEntries.teacherId, staff.id))
+      .leftJoin(subjects, eq(timetableEntries.subjectId, subjects.id))
+      .leftJoin(staff, eq(timetableEntries.teacherId, staff.id))
       .innerJoin(timeSlots, eq(timetableEntries.timeSlotId, timeSlots.id))
       .leftJoin(classrooms, eq(timetableEntries.classroomId, classrooms.id))
-      .where(where)
-      .orderBy(asc(timetableEntries.dayOfWeek), asc(timeSlots.sequence))
+      .where(and(where, visibleSlot))
+      .orderBy(asc(timetableEntries.dayOfWeek), asc(timeSlots.sequence), asc(timetableEntries.id))
       .offset((q.page - 1) * q.limit)
       .limit(q.limit),
-    db.select({ total: count() }).from(timetableEntries).where(where),
+    db.select({ total: count() }).from(timetableEntries)
+      .innerJoin(timeSlots, eq(timetableEntries.timeSlotId, timeSlots.id))
+      .where(and(where, visibleSlot)),
+    isPlannerManaged,
   ]);
 
-  return { rows, meta: pageMeta(q.page, q.limit, total) };
+  return { rows, meta: { ...pageMeta(q.page, q.limit, total), today, plannerManaged } };
 }
 
 async function loadEntry(tenantId: bigint, id: bigint) {
@@ -468,7 +561,15 @@ async function loadEntry(tenantId: bigint, id: bigint) {
   return row;
 }
 
+// Rows the timetable planner wrote are changed only by the planner (a new version), never through /api/timetable.
+function assertNotPlannerRow(row: { source: string }) {
+  if (row.source === 'planner') {
+    throw new HttpError(409, 'This lesson is managed by the timetable planner. Change it there.');
+  }
+}
+
 export async function createEntry(tenant: TenantContext, _actor: AuthUser, input: CreateEntryInput): Promise<unknown> {
+  const academicYearId = await resolveAcademicYearId(tenant, input.academicYearId);
   // no teacher sent: use the one assigned to this subject for the section (section_teachers)
   let teacherId = input.teacherId;
   if (teacherId === undefined) {
@@ -480,7 +581,7 @@ export async function createEntry(tenant: TenantContext, _actor: AuthUser, input
           eq(sectionTeachers.tenantId, tenant.id),
           eq(sectionTeachers.sectionId, input.sectionId),
           eq(sectionTeachers.subjectId, input.subjectId),
-          eq(sectionTeachers.academicYearId, input.academicYearId),
+          eq(sectionTeachers.academicYearId, academicYearId),
         ),
       )
       .limit(1);
@@ -505,7 +606,7 @@ export async function createEntry(tenant: TenantContext, _actor: AuthUser, input
 
   const [row] = await db
     .insert(timetableEntries)
-    .values({ ...shape, tenantId: tenant.id, academicYearId: input.academicYearId })
+    .values({ ...shape, tenantId: tenant.id, academicYearId, source: 'manual' })
     .returning();
   return toRow(row);
 }
@@ -517,11 +618,16 @@ export async function updateEntry(
   input: UpdateEntryInput,
 ): Promise<unknown> {
   const existing = await loadEntry(tenant.id, id);
+  assertNotPlannerRow(existing);
+
+  // manual rows are only ever written with a subject and a teacher (planner rows, which may lack them, were refused above)
+  const subjectId = (input.subjectId ?? existing.subjectId) as bigint;
+  const teacherId = (input.teacherId ?? existing.teacherId) as bigint;
 
   const next: EntryShape = {
     sectionId: existing.sectionId,
-    subjectId: input.subjectId ?? existing.subjectId,
-    teacherId: input.teacherId ?? existing.teacherId,
+    subjectId,
+    teacherId,
     timeSlotId: input.timeSlotId ?? existing.timeSlotId,
     classroomId: input.classroomId !== undefined ? input.classroomId : existing.classroomId,
     dayOfWeek: input.dayOfWeek ?? existing.dayOfWeek,
@@ -540,7 +646,7 @@ export async function updateEntry(
 
   const [row] = await db
     .update(timetableEntries)
-    .set(next)
+    .set(next) // never touches source, versionId or archivedByVersionId
     .where(and(eq(timetableEntries.id, id), eq(timetableEntries.tenantId, tenant.id)))
     .returning();
   return toRow(row);
@@ -548,7 +654,7 @@ export async function updateEntry(
 
 // "Delete" switches the entry off and keeps it, so the timetable history is not lost.
 export async function removeEntry(tenant: TenantContext, id: bigint): Promise<void> {
-  await loadEntry(tenant.id, id);
+  assertNotPlannerRow(await loadEntry(tenant.id, id));
   await db
     .update(timetableEntries)
     .set({ status: 'inactive' })

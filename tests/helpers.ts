@@ -21,17 +21,19 @@ export interface AuthedAgent {
   get: (url: string) => request.Test;
   post: (url: string) => request.Test;
   patch: (url: string) => request.Test;
+  put: (url: string) => request.Test;
   delete: (url: string) => request.Test;
   accessToken: string;
 }
 
 function wrapWithBearer(rawAgent: ReturnType<typeof request.agent>, holder: { token: string }): AuthedAgent {
-  const withAuth = (method: "get" | "post" | "patch" | "delete") => (url: string) =>
+  const withAuth = (method: "get" | "post" | "patch" | "put" | "delete") => (url: string) =>
     rawAgent[method](url).set("Authorization", `Bearer ${holder.token}`);
   return {
     get: withAuth("get"),
     post: withAuth("post"),
     patch: withAuth("patch"),
+    put: withAuth("put"),
     delete: withAuth("delete"),
     get accessToken() {
       return holder.token;
@@ -59,4 +61,12 @@ export async function signupAndLogin(tag: string) {
   };
 
   return { agent, switchOrganization, email, accessToken: res.body.data.accessToken as string, body: res.body };
+}
+
+// The id of the current academic year of the school the agent is signed in to (a new school gets one automatically).
+// Use this instead of a literal 1: academic_year_id is a real foreign key, and ids are global across schools.
+export async function currentAcademicYearId(agent: AuthedAgent): Promise<string> {
+  const res = await agent.get("/api/academic-years/current");
+  if (res.status !== 200) throw new Error(`GET /api/academic-years/current returned ${res.status}`);
+  return res.body.data.id as string;
 }

@@ -9,10 +9,13 @@ async function main() {
   // 1) a fee structure for Class V (reuse it if it already exists)
   let s = await pool.query("select id from fee_structures where tenant_id = $1 and class_id = $2 limit 1", [TENANT_ID.toString(), CLASS_ID]);
   if (!s.rows[0]) {
+    // the school's own current academic year (a literal 1 belongs to nobody in particular)
+    const y = await pool.query("select id from academic_years where tenant_id = $1 and is_current", [TENANT_ID.toString()]);
+    if (!y.rows[0]) throw new Error("This school has no current academic year");
     s = await pool.query(
       `insert into fee_structures (tenant_id, academic_year_id, class_id, name, code, frequency, status)
-       values ($1, 1, $2, 'Class V Annual Fees', 'CLS5', 'annual', 'active') returning id`,
-      [TENANT_ID.toString(), CLASS_ID]
+       values ($1, $3, $2, 'Class V Annual Fees', 'CLS5', 'annual', 'active') returning id`,
+      [TENANT_ID.toString(), CLASS_ID, y.rows[0].id]
     );
     console.log("created structure", s.rows[0].id);
   }

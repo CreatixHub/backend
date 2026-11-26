@@ -156,9 +156,22 @@ export const Staff = z
     hasBankAccount: z.boolean().openapi({ description: 'true if a bank account number is on file - the value itself is never returned' }),
     emergencyContactName: z.string().nullable(), emergencyContactPhone: z.string().nullable(),
     photoFileId: id('1').nullable(), socialLinks: z.record(z.string(), z.string()),
+    primarySubjectId: id('201').nullable().openapi({ description: 'The teacher\'s main subject (teaching staff only)' }),
+    additionalSubjectIds: z.array(id('202')).openapi({ description: 'Other subjects the teacher can teach (never includes the primary subject)' }),
+    maxPeriodsPerWeek: z.number().int().min(1).max(35).nullable().openapi({ description: 'Most periods a week the teacher can take, 1 to 35 (null = no limit set)' }),
     createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
   })
   .openapi('Staff');
+
+export const AcademicYear = z
+  .object({
+    id: id('61'), name: z.string().openapi({ example: '2026-27' }),
+    startsOn: z.string().openapi({ example: '2026-06-01', description: 'YYYY-MM-DD' }),
+    endsOn: z.string().openapi({ example: '2027-05-31', description: 'YYYY-MM-DD' }),
+    isCurrent: z.boolean().openapi({ description: 'Exactly one year of a school is current' }),
+    createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
+  })
+  .openapi('AcademicYear');
 
 export const Subject = z
   .object({
@@ -194,7 +207,10 @@ export const ClassSubject = z
 
 export const TimeSlot = z
   .object({
-    id: id('401'), name: z.string().openapi({ example: 'Period 1' }), sequence: z.number().int(),
+    id: id('401'), name: z.string().openapi({ example: 'Period 1' }),
+    dayType: z.string().openapi({ example: 'usual', description: 'Which bell this slot belongs to, e.g. usual or friday' }),
+    days: z.array(z.number().int().min(1).max(7)).openapi({ example: [1, 2, 3, 4, 5, 6], description: 'Weekdays the slot runs on (1 = Monday ... 7 = Sunday)' }),
+    sequence: z.number().int(),
     startsAt: z.string().openapi({ example: '09:00' }), endsAt: z.string().openapi({ example: '09:40' }),
     isBreak: z.boolean(), isActive: z.boolean(),
   })
@@ -208,7 +224,15 @@ export const SectionTeacher = z
 
 export const TimetableEntry = z
   .object({
-    id: id('403'), sectionId: id('302'), subjectId: id('201'), teacherId: id('101'), timeSlotId: id('401'),
+    id: id('403'), sectionId: id('302'),
+    subjectId: id('201').nullable().openapi({ description: 'null for a planner lesson that has no subject (see title)' }),
+    teacherId: id('101').nullable().openapi({ description: 'null for a planner lesson that has no teacher' }),
+    title: z.string().nullable().openapi({ description: 'Label for a planner lesson without a subject. In the list, subjectName falls back to this when there is no subject.' }),
+    source: z.enum(['manual', 'planner']).openapi({ description: 'Who wrote the row: the /timetable routes (manual) or the timetable planner' }),
+    versionId: id('1').nullable().openapi({ description: 'The planner version that wrote the row' }),
+    archivedByVersionId: id('1').nullable().openapi({ description: 'The planner version that replaced the row' }),
+    classroomIds: z.array(id('12')).openapi({ description: 'Every room a planner lesson uses (classroomId holds the main one)' }),
+    timeSlotId: id('401'),
     classroomId: id('1').nullable(), dayOfWeek: z.number().int().min(1).max(7).openapi({ description: '1 = Monday ... 7 = Sunday' }),
     academicYearId: id('1'), effectiveFrom: z.string(), effectiveTo: z.string().nullable(),
     status: z.enum(['active', 'inactive']),

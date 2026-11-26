@@ -4,7 +4,6 @@ import {
   admissions,
   classes,
   guardians,
-  organizations,
   periodAttendance,
   sections,
   staff,
@@ -16,6 +15,7 @@ import {
 } from '../../db/schema';
 import { HttpError } from '../../lib/errors';
 import { logger } from '../../lib/logger';
+import { schoolToday } from '../../lib/schoolDate';
 import { assertStudentReadable, resolveStudentScope, studentScopeCondition } from '../../lib/ownership';
 import { hasPermission, type TenantContext } from '../../lib/tenant';
 import type { AuthUser } from '../../middleware/authenticate';
@@ -34,16 +34,6 @@ import type {
 // of a period is every active student of the period's class.
 
 const pageMeta = (page: number, limit: number, total: number) => ({ page, limit, total, pages: Math.ceil(total / limit) });
-
-// today's date in the school's timezone, as YYYY-MM-DD
-async function todayFor(tenant: TenantContext): Promise<string> {
-  const [org] = await db.select({ tz: organizations.timezone }).from(organizations).where(eq(organizations.id, tenant.id)).limit(1);
-  try {
-    return new Date().toLocaleDateString('en-CA', { timeZone: org?.tz || 'UTC' });
-  } catch {
-    return new Date().toISOString().slice(0, 10);
-  }
-}
 
 // 1 (Mon) - 7 (Sun), same as timetable_entries.day_of_week
 const weekdayOf = (date: string) => {
@@ -65,7 +55,7 @@ const canMarkAny = (tenant: TenantContext) => hasPermission(tenant, 'attendance.
 const entryColumns = () => ({
   id: timetableEntries.id,
   dayOfWeek: timetableEntries.dayOfWeek,
-  teacherId: timetableEntries.teacherId,
+  teacherId: staff.id, // same value as timetable_entries.teacher_id; typed non-null because staff is INNER joined (a lesson without a teacher is not a period you can mark)
   teacherName: staff.fullName,
   sectionId: timetableEntries.sectionId,
   sectionName: sections.name,
@@ -81,6 +71,9 @@ const entryColumns = () => ({
   endsAt: timeSlots.endsAt,
 });
 
+// Subjects and staff are INNER joined on purpose: activities without a subject or teacher (planner rows such as
+// Library/Assembly) are not periods you can mark: period_attendance.subject_id and teacher_id are NOT NULL;
+// a future change would need a migration.
 const entryFrom = () =>
   db
     .select(entryColumns())
@@ -91,11 +84,19 @@ const entryFrom = () =>
     .innerJoin(timeSlots, eq(timetableEntries.timeSlotId, timeSlots.id))
     .innerJoin(staff, eq(timetableEntries.teacherId, staff.id));
 
+const slotRunsOnEntryDay = sql`${timetableEntries.dayOfWeek} = ANY(${timeSlots.days})`;
+
 // The period must exist, run on that weekday, be in effect on that date and not be in the future,
 // and the caller must be its teacher (or have attendance.manage).
 async function loadEntryFor(tenant: TenantContext, actor: AuthUser, entryId: bigint, date: string) {
   const [entry] = await entryFrom()
-    .where(and(eq(timetableEntries.id, entryId), eq(timetableEntries.tenantId, tenant.id), eq(timetableEntries.status, 'active')))
+    .where(and(
+      eq(timetableEntries.id, entryId),
+      eq(timetableEntries.tenantId, tenant.id),
+      eq(timetableEntries.status, 'active'),
+      eq(timeSlots.isBreak, false),
+      slotRunsOnEntryDay,
+    ))
     .limit(1);
   if (!entry) throw new HttpError(404, 'Period not found');
 
@@ -110,7 +111,7 @@ async function loadEntryFor(tenant: TenantContext, actor: AuthUser, entryId: big
   if (weekdayOf(date) !== entry.dayOfWeek) {
     throw new HttpError(400, 'This period does not run on that day of the week');
   }
-  if (date > (await todayFor(tenant))) {
+  if (date > (await schoolToday(tenant))) {
     throw new HttpError(400, 'Attendance cannot be marked for a future date');
   }
 
@@ -155,7 +156,7 @@ async function rosterOf(tenant: TenantContext, classId: bigint) {
 
 // ---------------------------------------------------------------- the periods of a day
 export async function listPeriods(tenant: TenantContext, actor: AuthUser, q: ListPeriodsInput) {
-  const date = q.date ?? (await todayFor(tenant));
+  const date = q.date ?? (await schoolToday(tenant));
 
   let teacherCond;
   if (!canMarkAny(tenant)) {
@@ -173,11 +174,12 @@ export async function listPeriods(tenant: TenantContext, actor: AuthUser, q: Lis
         lte(timetableEntries.effectiveFrom, date),
         or(isNull(timetableEntries.effectiveTo), gte(timetableEntries.effectiveTo, date)),
         eq(timeSlots.isBreak, false),
+        slotRunsOnEntryDay,
         teacherCond,
         q.classId ? eq(classes.id, q.classId) : undefined,
       ),
     )
-    .orderBy(asc(classes.gradeLevel), asc(classes.name), asc(timeSlots.sequence));
+    .orderBy(asc(classes.gradeLevel), asc(classes.name), asc(timeSlots.startsAt), asc(timeSlots.sequence));
 
   if (entries.length === 0) return { date, periods: [] as unknown[] };
 

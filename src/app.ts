@@ -17,6 +17,7 @@ import { authenticate } from "./middleware/authenticate";
 import { privateAuthRouter } from "./modules/auth/auth.routes";
 import { docsEnabled, docsRouter } from "./docs/docs.routes";
 import { membersRouter } from "./modules/members/members.routes";
+import { academicYearsRouter } from "./modules/academic-years/academicYears.routes";
 import { organizationsRouter } from "./modules/organizations/organizations.routes";
 import { permissionsRouter, rolesRouter } from "./modules/roles/roles.routes";
 import { staffRouter } from "./modules/staff/staff.routes";
@@ -26,6 +27,7 @@ import { classesRouter, sectionsRouter } from "./modules/classes/classes.routes"
 import { classTeachersRouter } from "./modules/classTeachers/classTeachers.routes";
 import { feeCollectionRouter, feeStructurePublishRouter } from "./modules/feeCollection/feeCollection.routes";
 import { sectionTeachersRouter, timeSlotsRouter, timetableRouter } from "./modules/timetable/timetable.routes";
+import { plannerRouter } from "./modules/timetable-planner/planner.routes";
 import { homeworkRouter, homeworkSubmissionsRouter } from "./modules/homework/homework.routes";
 import {
   driversRouter,
@@ -123,6 +125,7 @@ export function createApp() {
   app.use("/api/auth", privateAuthRouter); // me, switch-organization
   app.use("/api/organizations", organizationsRouter);
   app.use("/api/members", membersRouter);
+  app.use("/api/academic-years", academicYearsRouter);
   app.use("/api/roles", rolesRouter);
   app.use("/api/permissions", permissionsRouter);
   app.use("/api/staff/me/class", myClassRouter); // before /api/staff so it is found first
@@ -134,6 +137,7 @@ export function createApp() {
   app.use("/api/time-slots", timeSlotsRouter);
   app.use("/api/section-teachers", sectionTeachersRouter);
   app.use("/api/timetable", timetableRouter);
+  app.use("/api/timetable-planner", plannerRouter);
   app.use("/api/homework", homeworkRouter);
   app.use("/api/homework-submissions", homeworkSubmissionsRouter);
   app.use("/api/notes", notesRouter);
