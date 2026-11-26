@@ -12,6 +12,7 @@ const schema = z.object({
   JWT_ACCESS_TTL: z.coerce.number().int().positive().default(900), // seconds
   REFRESH_TTL_DAYS: z.coerce.number().int().positive().default(30),
   AUTH_RATE_LIMIT: z.coerce.number().int().positive().default(10), // sign-up / sign-in attempts per minute per IP
+  API_RATE_LIMIT: z.coerce.number().int().positive().default(100), // all /api requests per minute per IP
   PORT: z.coerce.number().int().positive().default(5000),
   CORS_ORIGINS: z.string().optional(), // comma separated list of allowed browser origins
   COOKIE_SECURE: z.enum(["true", "false"]).default("false").transform((v) => v === "true"),

@@ -403,7 +403,7 @@ export class Schedule {
    * Can this block start at (day, firstPeriod)? On success returns who teaches and where.
    * On failure returns every blocker so the UI and the "why unscheduled" report can name them.
    */
-  resolve(block, day, first, { ignore = null, preferred = null } = {}) {
+  resolve(block, day, first, { ignore = null, preferred = null, relaxCritical = false } = {}) {
     const blockers = [];
     const periods = this.periodsByDay.get(day);
     if (!periods) return { ok: false, blockers: [{ kind: 'day', reason: 'closed' }], assign: [] };
@@ -434,19 +434,23 @@ export class Schedule {
         if (Number.isInteger(max) && (occupied?.size ?? occupied?.length ?? 0) + slots.length > max) {
           return fail(teacher.name + ' would exceed the weekly limit of ' + max + ' teaching periods.');
         }
-        const free = this.#weight('teacherMinFreePerDay', 'teacher', id);
-        const daily = this.#weight('teacherMaxPerDay', 'teacher', id);
-        let used = slots.length;
-        if (free.w === CRITICAL || daily.w === CRITICAL) {
-          for (const [key] of occupied ?? []) if (Math.floor(key / 100) === day) used += 1;
-        }
-        if (daily.w === CRITICAL && used > daily.value) {
-          return fail(teacher.name + ' would exceed the daily limit of ' + daily.value + ' teaching periods on ' + DAY_NAMES[day] + '.');
-        }
-        if (free.w === CRITICAL) {
-          const available = this.#availableTeachingSlots(id, day);
-          if (used > Math.max(0, available - free.value)) {
-            return fail(teacher.name + ' needs ' + free.value + ' available free period(s) on ' + DAY_NAMES[day] + '.');
+        // Rebuilding an already-saved draft (fromEntries) must not drop a lesson just because a critical rule
+        // got stricter since it was placed: that is reported separately by criticalViolations(), not here.
+        if (!relaxCritical) {
+          const free = this.#weight('teacherMinFreePerDay', 'teacher', id);
+          const daily = this.#weight('teacherMaxPerDay', 'teacher', id);
+          let used = slots.length;
+          if (free.w === CRITICAL || daily.w === CRITICAL) {
+            for (const [key] of occupied ?? []) if (Math.floor(key / 100) === day) used += 1;
+          }
+          if (daily.w === CRITICAL && used > daily.value) {
+            return fail(teacher.name + ' would exceed the daily limit of ' + daily.value + ' teaching periods on ' + DAY_NAMES[day] + '.');
+          }
+          if (free.w === CRITICAL) {
+            const available = this.#availableTeachingSlots(id, day);
+            if (used > Math.max(0, available - free.value)) {
+              return fail(teacher.name + ' needs ' + free.value + ' available free period(s) on ' + DAY_NAMES[day] + '.');
+            }
           }
         }
       }
@@ -1490,7 +1494,7 @@ export class Schedule {
       for (const e of list) preferred[e.unitKey] = { teacherIds: e.teacherIds || [], roomIds: e.roomIds || [] };
       const assignKeys = block.units.map((u) => u.key);
       if (assignKeys.some((k) => !preferred[k])) { dropped.push({ blockId, reason: 'The lesson changed in the plan.' }); continue; }
-      const r = schedule.resolve(block, head.day, head.startNo, { preferred });
+      const r = schedule.resolve(block, head.day, head.startNo, { preferred, relaxCritical: true });
       if (!r.ok) { dropped.push({ blockId, reason: r.blockers.map((b) => schedule.#describe(b)).join(' ') }); continue; }
       schedule.apply(block, head.day, head.startNo, r.assign, Boolean(head.locked));
     }

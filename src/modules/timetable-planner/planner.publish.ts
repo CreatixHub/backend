@@ -432,7 +432,7 @@ export async function publishVersion(
       await lockPlannerSettings(tx, tenant, yearId, true);
       const version = await findPlannerVersion(tx, tenant, yearId, versionId, { forUpdate: true });
       if (await currentPublication(tx, tenant, yearId) !== previousId) {
-        throw new HttpError(409, 'Another timetable was published while this request was waiting. Refresh the publishing preview and review it again.');
+        throw new HttpError(409, 'Another timetable was already published while this request was waiting. Refresh the publishing preview and review it again.');
       }
       const { blockers } = assess(version, await loadPlannerSnapshot(tx, tenant, yearId));
       if (blockers.length) {

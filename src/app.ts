@@ -104,11 +104,11 @@ export function createApp() {
   app.use(
     rateLimit({
       windowMs: 60_000,
-      limit: 100,
+      limit: config.API_RATE_LIMIT,
       standardHeaders: true,
       legacyHeaders: false,
     }),
-  ); // 100 req/min/IP
+  ); // config.API_RATE_LIMIT req/min/IP (default 100)
 
   // ---- API documentation: /api/docs (Swagger UI) and /api/openapi.json. Public, so BEFORE authenticate; off in production. ----
   if (docsEnabled) app.use("/api", docsRouter());
