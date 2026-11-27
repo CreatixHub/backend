@@ -482,33 +482,61 @@ export async function listStudents(tenant: TenantContext, actor: AuthUser, q: Li
   return { rows: rows.map(toRow), meta: pageMeta(q.page, q.limit, total) };
 }
 
-export async function getStudent(tenant: TenantContext, actor: AuthUser, id: bigint) {
-  const scope = await resolveStudentScope(tenant, actor.id, 'students.view');
-  assertStudentReadable(scope, id, 'Student not found');
-
+async function loadStudentCore(tenantId: bigint, whereCond: ReturnType<typeof and>) {
   const [row] = await db
     .select({
       ...getTableColumns(students),
       houseName: studentHouses.name,
       houseColor: studentHouses.color,
+      className: classes.name,
+      gradeLevel: classes.gradeLevel,
+      previousSchool: admissions.previousSchool,
     })
     .from(students)
     .leftJoin(studentHouses, eq(students.studentHouseId, studentHouses.id))
-    .where(and(eq(students.id, id), eq(students.tenantId, tenant.id), isNull(students.deletedAt)))
+    .leftJoin(
+      admissions,
+      and(
+        eq(admissions.tenantId, tenantId),
+        or(eq(admissions.id, students.admissionId), eq(admissions.studentId, students.id)),
+        isNull(admissions.deletedAt),
+      ),
+    )
+    .leftJoin(classes, eq(classes.id, admissions.classId))
+    .where(whereCond)
     .limit(1);
+  return row ?? null;
+}
+
+async function loadStudentAdmissionSummary(tenantId: bigint, admissionId: bigint | null) {
+  if (!admissionId) return null;
+  const rows = await db
+    .select({
+      id: admissions.id,
+      applicationNo: admissions.applicationNo,
+      status: admissions.status,
+      appliedOn: admissions.appliedOn,
+    })
+    .from(admissions)
+    .where(and(eq(admissions.id, admissionId), eq(admissions.tenantId, tenantId), isNull(admissions.deletedAt)))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+export async function getStudent(tenant: TenantContext, actor: AuthUser, id: bigint) {
+  const scope = await resolveStudentScope(tenant, actor.id, 'students.view');
+  assertStudentReadable(scope, id, 'Student not found');
+
+  const row = await loadStudentCore(
+    tenant.id,
+    and(eq(students.id, id), eq(students.tenantId, tenant.id), isNull(students.deletedAt)),
+  );
   if (!row) throw new HttpError(404, 'Student not found');
 
   const [guardianList, documentList, admission] = await Promise.all([
     loadStudentGuardiansList(tenant.id, id),
     loadStudentDocumentsList(tenant.id, id),
-    row.admissionId
-      ? db
-          .select({ id: admissions.id, applicationNo: admissions.applicationNo, status: admissions.status, appliedOn: admissions.appliedOn })
-          .from(admissions)
-          .where(and(eq(admissions.id, row.admissionId), eq(admissions.tenantId, tenant.id), isNull(admissions.deletedAt)))
-          .limit(1)
-          .then((r) => r[0] ?? null)
-      : Promise.resolve(null),
+    loadStudentAdmissionSummary(tenant.id, row.admissionId),
   ]);
 
   return {
@@ -519,39 +547,47 @@ export async function getStudent(tenant: TenantContext, actor: AuthUser, id: big
   };
 }
 
-// The signed-in student's own record + guardians + house.
+// The signed-in student's own record + guardians + house + class + documents.
 // No permission check: the lookup is tied to the caller's own login (students.userId).
 export async function getMyStudent(tenant: TenantContext, actor: AuthUser) {
-  const [row] = await db
-    .select({
-      ...getTableColumns(students),
-      houseName: studentHouses.name,
-      houseColor: studentHouses.color,
-    })
-    .from(students)
-    .leftJoin(studentHouses, eq(students.studentHouseId, studentHouses.id))
-    .where(and(eq(students.tenantId, tenant.id), eq(students.userId, actor.id), isNull(students.deletedAt)))
-    .limit(1);
+  const row = await loadStudentCore(
+    tenant.id,
+    and(eq(students.tenantId, tenant.id), eq(students.userId, actor.id), isNull(students.deletedAt)),
+  );
   if (!row) throw new HttpError(404, 'No student record is linked to this login');
 
-  const guardianRows = await db
-    .select({
-      fullName: guardians.fullName,
-      relation: guardians.relation,
-      isPrimary: studentGuardians.isPrimary,
-    })
-    .from(studentGuardians)
-    .innerJoin(guardians, eq(studentGuardians.guardianId, guardians.id))
-    .where(
-      and(
-        eq(studentGuardians.tenantId, tenant.id),
-        eq(studentGuardians.studentId, row.id),
-        isNull(guardians.deletedAt),
-      ),
-    )
-    .orderBy(desc(studentGuardians.isPrimary), asc(guardians.fullName));
+  const [guardianRows, documentRows, admission] = await Promise.all([
+    db
+      .select({
+        id: guardians.id,
+        fullName: guardians.fullName,
+        relation: guardians.relation,
+        phone: guardians.phone,
+        email: guardians.email,
+        occupation: guardians.occupation,
+        isPrimary: studentGuardians.isPrimary,
+        canPickUp: studentGuardians.canPickUp,
+      })
+      .from(studentGuardians)
+      .innerJoin(guardians, eq(studentGuardians.guardianId, guardians.id))
+      .where(
+        and(
+          eq(studentGuardians.tenantId, tenant.id),
+          eq(studentGuardians.studentId, row.id),
+          isNull(guardians.deletedAt),
+        ),
+      )
+      .orderBy(desc(studentGuardians.isPrimary), asc(guardians.fullName)),
+    loadStudentDocumentsList(tenant.id, row.id),
+    loadStudentAdmissionSummary(tenant.id, row.admissionId),
+  ]);
 
-  return { ...toRow(row), guardians: guardianRows };
+  return {
+    ...toRow(row),
+    admission,
+    guardians: guardianRows.map(toRow),
+    documents: documentRows.map(toRow),
+  };
 }
 
 // ================================================================ MY CLASS & TIMETABLE (signed-in student)
